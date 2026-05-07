@@ -16,12 +16,22 @@ class BrowserTool(Tool):
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["goto", "click", "type", "press", "text", "title", "screenshot", "evaluate"],
+                "enum": ["goto", "click", "type", "press", "wait", "text", "title", "screenshot", "evaluate"],
             },
             "url": {"type": "string", "description": "URL for goto."},
             "selector": {"type": "string", "description": "CSS selector for click, type, press, or text."},
             "text": {"type": "string", "description": "Text to type."},
             "key": {"type": "string", "description": "Keyboard key for press, such as Enter."},
+            "load_state": {
+                "type": "string",
+                "enum": ["domcontentloaded", "load", "networkidle"],
+                "description": "Optional Playwright load state for wait.",
+            },
+            "text_min_length": {
+                "type": "integer",
+                "description": "Optional minimum body text length to wait for.",
+                "default": 0,
+            },
             "script": {"type": "string", "description": "JavaScript expression for evaluate."},
             "path": {"type": "string", "description": "Optional screenshot output path."},
             "timeout_ms": {"type": "integer", "default": 10000, "minimum": 1000, "maximum": 60000},
@@ -76,6 +86,25 @@ class BrowserTool(Tool):
             key = str(arguments["key"])
             page.locator(selector).press(key, timeout=timeout)
             return ToolResult(f"Pressed {key} on {selector}")
+
+        if action == "wait":
+            load_state = arguments.get("load_state")
+            if load_state:
+                page.wait_for_load_state(str(load_state), timeout=timeout)
+
+            selector = arguments.get("selector")
+            if selector:
+                page.locator(str(selector)).first.wait_for(state="visible", timeout=timeout)
+
+            text_min_length = int(arguments.get("text_min_length", 0))
+            if text_min_length > 0:
+                page.wait_for_function(
+                    "(minLength) => document.body && document.body.innerText.trim().length >= minLength",
+                    arg=text_min_length,
+                    timeout=timeout,
+                )
+
+            return ToolResult(f"Wait completed\nurl: {page.url}\ntitle: {page.title()}")
 
         if action == "text":
             selector = str(arguments.get("selector") or "body")

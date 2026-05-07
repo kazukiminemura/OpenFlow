@@ -182,6 +182,10 @@ class LocalAgent:
             self._trace_tool_result(result)
             return AgentResponse(text=self._direct_tool_text(f"{known_url} を開きました。", result), steps=1)
 
+        research_query = self._research_query(text)
+        if research_query:
+            return self._run_search_and_summarize(research_query)
+
         search_query = self._search_query(text)
         if search_query:
             return self._run_google_search(search_query)
@@ -210,49 +214,182 @@ class LocalAgent:
         normalized = text.strip()
         patterns = [
             r"^検索して\s*(?P<query>.+)$",
+            r"^検索して\s*(?P<query>.+?)\s*まとめて$",
+            r"^(?P<query>.+?)について検索して$",
+            r"^(?P<query>.+?)について検索して\s*まとめて$",
             r"^(?P<query>.+?)を検索して$",
+            r"^(?P<query>.+?)を検索して\s*まとめて$",
             r"^(?P<query>.+?)で検索して$",
+            r"^(?P<query>.+?)で検索して\s*まとめて$",
             r"^(?P<query>.+?)検索して$",
+            r"^(?P<query>.+?)検索して\s*まとめて$",
             r"^search\s+(?P<query>.+)$",
         ]
         for pattern in patterns:
             match = re.match(pattern, normalized, flags=re.IGNORECASE)
             if match:
-                query = match.group("query").strip()
+                query = self._clean_query(match.group("query"))
                 return query or None
         return None
 
+    def _research_query(self, text: str) -> str | None:
+        normalized = text.strip()
+        patterns = [
+            r"^(?P<query>.+?)について調べて$",
+            r"^(?P<query>.+?)を調べて$",
+            r"^(?P<query>.+?)調べて$",
+            r"^(?P<query>.+?)について検索して\s*まとめて$",
+            r"^(?P<query>.+?)を検索して\s*まとめて$",
+            r"^(?P<query>.+?)検索して\s*まとめて$",
+        ]
+        for pattern in patterns:
+            match = re.match(pattern, normalized, flags=re.IGNORECASE)
+            if match:
+                query = self._clean_query(match.group("query"))
+                return query or None
+        return None
+
+    def _clean_query(self, query: str) -> str:
+        cleaned = re.sub(r"\s+", " ", query).strip(" 　")
+        cleaned = re.sub(r"(について|とは)$", "", cleaned).strip(" 　")
+        return cleaned
+
     def _run_google_search(self, query: str) -> AgentResponse:
-        self._trace_tool_call("browser", {"action": "goto", "url": "https://www.google.com/"})
-        goto_result = self.tools.run("browser", {"action": "goto", "url": "https://www.google.com/"})
+        provider_name, result = self._search_with_fallback(query)
+        return AgentResponse(
+            text=self._direct_tool_text(f"`{query}` を{provider_name}で検索しました。", result),
+            steps=1,
+        )
+
+    def _run_search_and_summarize(self, query: str) -> AgentResponse:
+        provider_name, result = self._search_with_fallback(query)
+        if not result.ok:
+            return AgentResponse(text=result.content, steps=1)
+
+        text_result = self.tools.run("browser", {"action": "text", "selector": "body", "timeout_ms": 10000})
+        self._trace_tool_result(text_result)
+        if not text_result.ok:
+            return AgentResponse(text=self._direct_tool_text(f"`{query}` を{provider_name}で検索しました。", result), steps=1)
+
+        summary = self._summarize_search_text(query, text_result.content)
+        return AgentResponse(
+            text=(
+                f"`{query}` を{provider_name}で検索し、結果ページを表示しました。\n\n"
+                f"{summary}\n\n"
+                f"{result.content}"
+            ),
+            steps=1,
+        )
+
+    def _search_with_fallback(self, query: str) -> tuple[str, ToolResult]:
+        google_result = self._run_search_flow(
+            provider_name="Google",
+            home_url="https://www.google.com/",
+            query=query,
+        )
+        if google_result.ok and not self._is_google_blocked(google_result.content):
+            return "Google", google_result
+
+        self._trace("Googleの検索結果表示が完了しなかったため、DuckDuckGoで再検索します。")
+        duckduckgo_result = self._run_search_flow(
+            provider_name="DuckDuckGo",
+            home_url="https://duckduckgo.com/",
+            query=query,
+        )
+        return "DuckDuckGo", duckduckgo_result
+
+    def _run_search_flow(self, provider_name: str, home_url: str, query: str) -> ToolResult:
+        search_selector = "textarea[name='q'], input[name='q']"
+
+        self._trace_tool_call("browser", {"action": "goto", "url": home_url})
+        goto_result = self.tools.run("browser", {"action": "goto", "url": home_url})
         self._trace_tool_result(goto_result)
         if not goto_result.ok:
-            return AgentResponse(text=goto_result.content, steps=1)
+            return goto_result
 
-        self._trace_tool_call("browser", {"action": "type", "selector": "textarea[name='q'], input[name='q']", "text": query})
+        self._trace_tool_call("browser", {"action": "type", "selector": search_selector, "text": query})
         type_result = self.tools.run(
             "browser",
-            {"action": "type", "selector": "textarea[name='q'], input[name='q']", "text": query},
+            {"action": "type", "selector": search_selector, "text": query},
         )
         self._trace_tool_result(type_result)
         if not type_result.ok:
-            return AgentResponse(text=type_result.content, steps=1)
+            return type_result
 
-        self._trace_tool_call("browser", {"action": "press", "selector": "textarea[name='q'], input[name='q']", "key": "Enter"})
+        self._trace_tool_call("browser", {"action": "press", "selector": search_selector, "key": "Enter"})
         press_result = self.tools.run(
             "browser",
-            {"action": "press", "selector": "textarea[name='q'], input[name='q']", "key": "Enter"},
+            {"action": "press", "selector": search_selector, "key": "Enter"},
         )
         self._trace_tool_result(press_result)
         if not press_result.ok:
-            return AgentResponse(text=press_result.content, steps=1)
+            return press_result
+
+        wait_args = {"action": "wait", "load_state": "load", "text_min_length": 20, "timeout_ms": 20000}
+        self._trace_tool_call("browser", wait_args)
+        wait_result = self.tools.run("browser", wait_args)
+        self._trace_tool_result(wait_result)
+        if not wait_result.ok:
+            return ToolResult(
+                f"{provider_name}の検索結果ページへの遷移は始まりましたが、描画完了を確認できませんでした。\n{wait_result.content}",
+                ok=False,
+            )
 
         title_result = self.tools.run("browser", {"action": "title"})
         self._trace_tool_result(title_result)
-        return AgentResponse(
-            text=self._direct_tool_text(f"`{query}` をGoogleで検索しました。", title_result),
-            steps=1,
+        return title_result
+
+    def _is_google_blocked(self, content: str) -> bool:
+        lowered = content.lower()
+        return "google.com/sorry/" in lowered or "/sorry/index" in lowered or "unusual traffic" in lowered
+
+    def _summarize_search_text(self, query: str, content: str) -> str:
+        ignored = {
+            "DuckDuckGo",
+            "すべて",
+            "画像",
+            "動画",
+            "ニュース",
+            "ショッピング",
+            "地図",
+            "検索",
+            "設定",
+            "プライバシー",
+            "利用規約",
+            "広告",
+            "保護されています",
+            "画像をさらに表示",
+            "これは役に立ちましたか？",
+        }
+        ignored_prefixes = (
+            "DuckDuckGo",
+            "セーフサーチ",
+            "検索設定",
+            "メニューを開く",
+            "日本",
+            "全期間",
         )
+        lines: list[str] = []
+        for raw_line in content.splitlines():
+            line = re.sub(r"\s+", " ", raw_line).strip()
+            if len(line) < 8 or line in ignored:
+                continue
+            if line == query or any(line.startswith(prefix) for prefix in ignored_prefixes):
+                continue
+            if line.startswith(("http://", "https://")):
+                continue
+            if re.fullmatch(r"[\w.-]+\.[a-z]{2,}.*", line, flags=re.IGNORECASE):
+                continue
+            if line not in lines:
+                lines.append(line)
+            if len(lines) >= 8:
+                break
+
+        if not lines:
+            return "検索結果の本文を取得しましたが、要約できるテキストが少なすぎました。"
+
+        bullets = "\n".join(f"- {line}" for line in lines[:5])
+        return f"検索結果から見える `{query}` の要点候補:\n{bullets}"
 
     def _known_site_url(self, normalized: str) -> str | None:
         for name, url in KNOWN_SITES.items():
