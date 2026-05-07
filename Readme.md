@@ -50,6 +50,7 @@ openhands-agent "terminal: Get-Location"
 ```dotenv
 OLLAMA_NUM_CTX=131072
 OLLAMA_TEMPERATURE=0.2
+OLLAMA_MAX_TOKENS=800
 BROWSER_LIGHT_MODE=true
 BROWSER_BLOCK_RESOURCES=image,media,font
 BROWSER_VIEWPORT_WIDTH=1024
@@ -64,6 +65,8 @@ AGENT_TRACE=true
 `gemma4:e4b` のローカルモデル情報では context length が `131072` なので、既定で `OLLAMA_NUM_CTX=131072` を指定しています。`AGENT_HISTORY_LIMIT=0` は会話履歴の自動削除を無効にします。
 
 `AGENT_TRACE=true` にすると、内部推論ではなく、ステップ進行・ツール呼び出し・ツール結果のトレースを表示します。
+
+応答末尾には `[tokens]` としてモデル呼び出しの合計トークン数を表示します。Ollama側が `usage` を返さない直接操作だけの処理では `unavailable` になります。
 
 ## 拡張方法
 

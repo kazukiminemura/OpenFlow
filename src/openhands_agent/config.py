@@ -13,6 +13,7 @@ class AgentConfig:
     model: str
     num_ctx: int | None
     temperature: float | None
+    max_tokens: int | None
     api_key: str
     workdir: Path
     browser_headless: bool
@@ -34,6 +35,7 @@ def load_config() -> AgentConfig:
         model=os.getenv("OLLAMA_MODEL", "gemma4:e4b"),
         num_ctx=_optional_int(os.getenv("OLLAMA_NUM_CTX", "131072")),
         temperature=_optional_float(os.getenv("OLLAMA_TEMPERATURE", "0.2")),
+        max_tokens=_optional_int(os.getenv("OLLAMA_MAX_TOKENS", "800")),
         api_key=os.getenv("OPENAI_API_KEY", "ollama"),
         workdir=workdir,
         browser_headless=os.getenv("BROWSER_HEADLESS", "false").lower() in {"1", "true", "yes"},

@@ -39,6 +39,40 @@ SYSTEM_PROMPT = """あなたはローカルで動くAIエージェントです�
 class AgentResponse:
     text: str
     steps: int
+    token_usage: "TokenUsage | None" = None
+
+
+@dataclass
+class TokenUsage:
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    calls: int = 0
+
+    def add(self, usage: Any) -> None:
+        if usage is None:
+            return
+        prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+        completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
+        self.prompt_tokens += prompt_tokens
+        self.completion_tokens += completion_tokens
+        self.total_tokens += total_tokens or prompt_tokens + completion_tokens
+        self.calls += 1
+
+    def has_values(self) -> bool:
+        return self.calls > 0 and self.total_tokens > 0
+
+    def render(self) -> str:
+        if not self.has_values():
+            return "token_usage: unavailable"
+        return (
+            "token_usage: "
+            f"total={self.total_tokens}, "
+            f"prompt={self.prompt_tokens}, "
+            f"completion={self.completion_tokens}, "
+            f"model_calls={self.calls}"
+        )
 
 
 class AgentRuntimeError(RuntimeError):
@@ -56,6 +90,7 @@ class LocalAgent:
         history_limit: int = 12,
         num_ctx: int | None = None,
         temperature: float | None = None,
+        max_tokens: int | None = None,
         on_trace: Callable[[str], None] | None = None,
     ) -> None:
         self.client = client
@@ -66,14 +101,18 @@ class LocalAgent:
         self.history_limit = history_limit
         self.num_ctx = num_ctx
         self.temperature = temperature
+        self.max_tokens = max_tokens
         self.on_trace = on_trace
+        self.token_usage = TokenUsage()
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     def run(self, user_input: str) -> AgentResponse:
+        self.token_usage = TokenUsage()
         self._trace(f"入力を受け取りました: {self._trim_for_trace(user_input)}")
         direct_response = self._run_direct_command(user_input)
         if direct_response is not None:
             self._trace("直接操作として処理しました。")
+            direct_response.token_usage = self.token_usage
             return direct_response
 
         self.messages.append({"role": "user", "content": user_input})
@@ -114,11 +153,12 @@ class LocalAgent:
                 continue
 
             self._trace("最終応答を返します。")
-            return AgentResponse(text=content, steps=step)
+            return AgentResponse(text=content, steps=step, token_usage=self.token_usage)
 
         return AgentResponse(
             text=f"最大ステップ数 {self.max_steps} に達しました。途中結果を確認して、必要なら指示を分けてください。",
             steps=self.max_steps,
+            token_usage=self.token_usage,
         )
 
     def _next_message(self) -> dict[str, Any]:
@@ -128,6 +168,8 @@ class LocalAgent:
                 "model": self.model,
                 "messages": self.messages,
             }
+            if self.max_tokens is not None:
+                kwargs["max_tokens"] = self.max_tokens
             if self.native_tools:
                 kwargs["tools"] = self.tools.schemas()
                 kwargs["tool_choice"] = "auto"
@@ -142,6 +184,9 @@ class LocalAgent:
             completion = self.client.chat.completions.create(
                 **kwargs,
             )
+            self.token_usage.add(completion.usage)
+            if self.token_usage.has_values():
+                self._trace(self.token_usage.render())
         except NotFoundError as exc:
             raise AgentRuntimeError(
                 f"モデル '{self.model}' が Ollama に見つかりません。"
@@ -266,20 +311,79 @@ class LocalAgent:
         if not result.ok:
             return AgentResponse(text=result.content, steps=1)
 
-        text_result = self.tools.run("browser", {"action": "text", "selector": "body", "timeout_ms": 10000})
-        self._trace_tool_result(text_result)
-        if not text_result.ok:
-            return AgentResponse(text=self._direct_tool_text(f"`{query}` を{provider_name}で検索しました。", result), steps=1)
+        links = self._top_result_links(limit=3)
+        if not links:
+            text_result = self.tools.run("browser", {"action": "text", "selector": "body", "timeout_ms": 10000})
+            self._trace_tool_result(text_result)
+            if not text_result.ok:
+                return AgentResponse(text=self._direct_tool_text(f"`{query}` を{provider_name}で検索しました。", result), steps=1)
 
-        summary = self._summarize_search_text(query, text_result.content)
+            summary = self._summarize_search_text(query, text_result.content)
+            return AgentResponse(
+                text=(
+                    f"`{query}` を{provider_name}で検索し、結果ページを表示しました。\n\n"
+                    f"{summary}\n\n"
+                    f"{result.content}"
+                ),
+                steps=1,
+            )
+
+        page_summaries = self._inspect_top_links(query, links)
+        link_lines = "\n".join(f"{index}. {item['title']}\n   {item['url']}" for index, item in enumerate(links, start=1))
+        summary = self._combine_page_summaries(query, page_summaries)
         return AgentResponse(
             text=(
-                f"`{query}` を{provider_name}で検索し、結果ページを表示しました。\n\n"
+                f"`{query}` を{provider_name}で検索し、上位3件を確認しました。\n\n"
                 f"{summary}\n\n"
+                f"確認したリンク:\n{link_lines}\n\n"
                 f"{result.content}"
             ),
             steps=1,
         )
+
+    def _top_result_links(self, limit: int) -> list[dict[str, str]]:
+        self._trace_tool_call("browser", {"action": "links", "limit": limit})
+        links_result = self.tools.run("browser", {"action": "links", "limit": limit})
+        self._trace_tool_result(links_result)
+        if not links_result.ok:
+            return []
+        try:
+            parsed = json.loads(links_result.content)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(parsed, list):
+            return []
+        links: list[dict[str, str]] = []
+        for item in parsed:
+            if isinstance(item, dict) and isinstance(item.get("title"), str) and isinstance(item.get("url"), str):
+                links.append({"title": item["title"], "url": item["url"]})
+        return links[:limit]
+
+    def _inspect_top_links(self, query: str, links: list[dict[str, str]]) -> list[dict[str, str]]:
+        page_summaries: list[dict[str, str]] = []
+        for index, link in enumerate(links, start=1):
+            self._trace(f"上位リンク {index}/{len(links)} を確認します: {self._trim_for_trace(link['title'])}")
+            goto_args = {"action": "goto", "url": link["url"], "timeout_ms": 20000}
+            self._trace_tool_call("browser", goto_args)
+            goto_result = self.tools.run("browser", goto_args)
+            self._trace_tool_result(goto_result)
+            if not goto_result.ok:
+                page_summaries.append({**link, "summary": f"ページを開けませんでした: {goto_result.content}"})
+                continue
+
+            wait_args = {"action": "wait", "load_state": "domcontentloaded", "text_min_length": 80, "timeout_ms": 15000}
+            self._trace_tool_call("browser", wait_args)
+            wait_result = self.tools.run("browser", wait_args)
+            self._trace_tool_result(wait_result)
+
+            text_result = self.tools.run("browser", {"action": "text", "selector": "body", "timeout_ms": 10000})
+            self._trace_tool_result(text_result)
+            if not text_result.ok:
+                page_summaries.append({**link, "summary": f"本文を取得できませんでした: {text_result.content}"})
+                continue
+
+            page_summaries.append({**link, "summary": self._summarize_page_text(query, text_result.content)})
+        return page_summaries
 
     def _search_with_fallback(self, query: str) -> tuple[str, ToolResult]:
         google_result = self._run_search_flow(
@@ -390,6 +494,81 @@ class LocalAgent:
 
         bullets = "\n".join(f"- {line}" for line in lines[:5])
         return f"検索結果から見える `{query}` の要点候補:\n{bullets}"
+
+    def _summarize_page_text(self, query: str, content: str) -> str:
+        lines = self._important_lines(content)
+        if not lines:
+            return "本文を取得しましたが、要約できるテキストが少なすぎました。"
+
+        query_lower = query.lower()
+        scored: list[tuple[int, str]] = []
+        for index, line in enumerate(lines):
+            score = 0
+            if query_lower and query_lower in line.lower():
+                score += 4
+            if any(marker in line for marker in ["とは", "会社", "企業", "製品", "発表", "事業", "概要"]):
+                score += 2
+            score += max(0, 3 - index // 3)
+            scored.append((score, line))
+
+        selected: list[str] = []
+        for _, line in sorted(scored, key=lambda item: item[0], reverse=True):
+            if line not in selected:
+                selected.append(line)
+            if len(selected) >= 3:
+                break
+        return " / ".join(selected)
+
+    def _combine_page_summaries(self, query: str, page_summaries: list[dict[str, str]]) -> str:
+        if not page_summaries:
+            return f"`{query}` について、上位リンクから十分な情報を取得できませんでした。"
+
+        lines = [f"`{query}` について上位リンクから確認した要点:"]
+        for index, item in enumerate(page_summaries, start=1):
+            lines.append(f"- {index}件目: {item['summary']}")
+        return "\n".join(lines)
+
+    def _important_lines(self, content: str) -> list[str]:
+        ignored_exact = {
+            "DuckDuckGo",
+            "Google",
+            "検索",
+            "メニュー",
+            "ログイン",
+            "登録",
+            "広告",
+            "同意する",
+            "拒否する",
+            "Cookie",
+            "Cookies",
+            "プライバシー",
+            "利用規約",
+            "お問い合わせ",
+            "サイトマップ",
+        }
+        ignored_prefixes = (
+            "http://",
+            "https://",
+            "©",
+            "Copyright",
+            "All rights reserved",
+            "JavaScript",
+            "このサイトではCookie",
+        )
+        lines: list[str] = []
+        for raw_line in content.splitlines():
+            line = re.sub(r"\s+", " ", raw_line).strip()
+            if len(line) < 20 or len(line) > 260:
+                continue
+            if line in ignored_exact or any(line.startswith(prefix) for prefix in ignored_prefixes):
+                continue
+            if re.fullmatch(r"[\W\d_]+", line):
+                continue
+            if line not in lines:
+                lines.append(line)
+            if len(lines) >= 40:
+                break
+        return lines
 
     def _known_site_url(self, normalized: str) -> str | None:
         for name, url in KNOWN_SITES.items():

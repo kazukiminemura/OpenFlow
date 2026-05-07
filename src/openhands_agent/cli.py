@@ -38,12 +38,24 @@ def build_agent() -> LocalAgent:
         history_limit=config.history_limit,
         num_ctx=config.num_ctx,
         temperature=config.temperature,
+        max_tokens=config.max_tokens,
         on_trace=_print_trace if config.trace else None,
     )
 
 
 def _print_trace(message: str) -> None:
-    print(f"[trace] {message}", flush=True)
+    print(f"[trace] {_safe_console_text(message)}", flush=True)
+
+
+def _safe_console_text(text: str) -> str:
+    return text.encode(sys.stdout.encoding or "utf-8", errors="replace").decode(sys.stdout.encoding or "utf-8")
+
+
+def _format_token_usage(response: object) -> str:
+    usage = getattr(response, "token_usage", None)
+    if usage is None:
+        return "[tokens] unavailable"
+    return f"[tokens] {usage.render()}"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -56,7 +68,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.prompt:
             try:
                 response = agent.run(" ".join(args.prompt))
-                print(response.text)
+                print(_safe_console_text(response.text))
+                print(_safe_console_text(_format_token_usage(response)))
             except AgentRuntimeError as exc:
                 print(f"Error: {exc}")
                 return 1
@@ -77,7 +90,8 @@ def main(argv: list[str] | None = None) -> int:
 
             try:
                 response = agent.run(user_input)
-                print(response.text)
+                print(_safe_console_text(response.text))
+                print(_safe_console_text(_format_token_usage(response)))
             except AgentRuntimeError as exc:
                 print(f"Error: {exc}")
     finally:

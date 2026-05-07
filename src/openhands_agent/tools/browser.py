@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from playwright.sync_api import Browser, Page, Playwright, sync_playwright
 
@@ -16,7 +18,7 @@ class BrowserTool(Tool):
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["goto", "click", "type", "press", "wait", "text", "title", "screenshot", "evaluate"],
+                "enum": ["goto", "click", "type", "press", "wait", "text", "links", "title", "screenshot", "evaluate"],
             },
             "url": {"type": "string", "description": "URL for goto."},
             "selector": {"type": "string", "description": "CSS selector for click, type, press, or text."},
@@ -31,6 +33,11 @@ class BrowserTool(Tool):
                 "type": "integer",
                 "description": "Optional minimum body text length to wait for.",
                 "default": 0,
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of links to return for links.",
+                "default": 10,
             },
             "script": {"type": "string", "description": "JavaScript expression for evaluate."},
             "path": {"type": "string", "description": "Optional screenshot output path."},
@@ -111,6 +118,11 @@ class BrowserTool(Tool):
             content = page.locator(selector).inner_text(timeout=timeout)
             return ToolResult(self._trim(content))
 
+        if action == "links":
+            limit = int(arguments.get("limit", 10))
+            links = self._extract_links(page, limit=limit)
+            return ToolResult(json.dumps(links, ensure_ascii=False, indent=2))
+
         if action == "title":
             return ToolResult(f"title: {page.title()}\nurl: {page.url}")
 
@@ -163,6 +175,71 @@ class BrowserTool(Tool):
             route.abort()
             return
         route.continue_()
+
+    def _extract_links(self, page: Page, limit: int) -> list[dict[str, str]]:
+        raw_links: list[dict[str, str]] = page.evaluate(
+            """() => Array.from(document.querySelectorAll('a[href]')).map((link) => ({
+                title: (link.innerText || link.getAttribute('aria-label') || '').trim(),
+                url: link.href
+            }))"""
+        )
+        results: list[dict[str, str]] = []
+        seen_urls: set[str] = set()
+        seen_domains: set[str] = set()
+
+        for link in raw_links:
+            title = self._clean_text(link.get("title", ""))
+            url = str(link.get("url", ""))
+            if not self._is_result_link(title, url):
+                continue
+
+            normalized_url = url.split("#", 1)[0]
+            domain = urlparse(normalized_url).netloc.lower()
+            if normalized_url in seen_urls or domain in seen_domains:
+                continue
+
+            results.append({"title": title, "url": normalized_url})
+            seen_urls.add(normalized_url)
+            seen_domains.add(domain)
+            if len(results) >= limit:
+                break
+
+        return results
+
+    def _is_result_link(self, title: str, url: str) -> bool:
+        if len(title) < 4:
+            return False
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"}:
+            return False
+        host = parsed.netloc.lower()
+        blocked_hosts = {
+            "duckduckgo.com",
+            "www.google.com",
+            "google.com",
+            "accounts.google.com",
+            "support.google.com",
+            "policies.google.com",
+            "www.youtube.com",
+            "youtube.com",
+            "m.youtube.com",
+        }
+        if host in blocked_hosts:
+            return False
+        blocked_title_parts = [
+            "画像",
+            "動画",
+            "ニュース",
+            "ショッピング",
+            "検索設定",
+            "プライバシー",
+            "利用規約",
+            "フィードバック",
+        ]
+        return not any(part in title for part in blocked_title_parts)
+
+    def _clean_text(self, text: str) -> str:
+        return " ".join(text.split())
 
     def _screenshot_path(self, value: object) -> Path:
         if value:
