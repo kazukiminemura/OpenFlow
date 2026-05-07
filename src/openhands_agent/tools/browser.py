@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 from pathlib import Path
 from typing import Any
 
@@ -31,9 +30,21 @@ class BrowserTool(Tool):
         "additionalProperties": False,
     }
 
-    def __init__(self, workdir: Path, headless: bool) -> None:
+    def __init__(
+        self,
+        workdir: Path,
+        headless: bool,
+        light_mode: bool = True,
+        block_resources: set[str] | None = None,
+        viewport_width: int = 1024,
+        viewport_height: int = 720,
+    ) -> None:
         self.workdir = workdir
         self.headless = headless
+        self.light_mode = light_mode
+        self.block_resources = block_resources or set()
+        self.viewport_width = viewport_width
+        self.viewport_height = viewport_height
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
         self._page: Page | None = None
@@ -90,9 +101,39 @@ class BrowserTool(Tool):
         if self._page is not None:
             return self._page
         self._playwright = sync_playwright().start()
-        self._browser = self._playwright.chromium.launch(headless=self.headless)
-        self._page = self._browser.new_page(viewport={"width": 1366, "height": 900})
+        self._browser = self._playwright.chromium.launch(
+            headless=self.headless,
+            args=self._launch_args(),
+        )
+        self._page = self._browser.new_page(
+            viewport={"width": self.viewport_width, "height": self.viewport_height},
+            reduced_motion="reduce",
+        )
+        if self.light_mode and self.block_resources:
+            self._page.route("**/*", self._route_request)
         return self._page
+
+    def _launch_args(self) -> list[str]:
+        if not self.light_mode:
+            return []
+        return [
+            "--disable-background-networking",
+            "--disable-component-update",
+            "--disable-default-apps",
+            "--disable-extensions",
+            "--disable-features=Translate,MediaRouter",
+            "--disable-renderer-backgrounding",
+            "--disable-sync",
+            "--metrics-recording-only",
+            "--mute-audio",
+            "--no-first-run",
+        ]
+
+    def _route_request(self, route: Any) -> None:
+        if route.request.resource_type in self.block_resources:
+            route.abort()
+            return
+        route.continue_()
 
     def _screenshot_path(self, value: object) -> Path:
         if value:

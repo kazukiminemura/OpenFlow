@@ -18,7 +18,16 @@ def build_agent() -> LocalAgent:
 
     tools = ToolRegistry()
     tools.register(TerminalTool(config.workdir))
-    tools.register(BrowserTool(config.workdir, headless=config.browser_headless))
+    tools.register(
+        BrowserTool(
+            config.workdir,
+            headless=config.browser_headless,
+            light_mode=config.browser_light_mode,
+            block_resources=config.browser_block_resources,
+            viewport_width=config.browser_viewport_width,
+            viewport_height=config.browser_viewport_height,
+        )
+    )
 
     return LocalAgent(
         client=client,
@@ -26,7 +35,15 @@ def build_agent() -> LocalAgent:
         tools=tools,
         max_steps=config.max_steps,
         native_tools=config.native_tools,
+        history_limit=config.history_limit,
+        num_ctx=config.num_ctx,
+        temperature=config.temperature,
+        on_trace=_print_trace if config.trace else None,
     )
+
+
+def _print_trace(message: str) -> None:
+    print(f"[trace] {message}", flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:
