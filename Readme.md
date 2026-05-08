@@ -50,6 +50,8 @@ openhands-agent "open browser"
 openhands-agent "open https://example.com"
 openhands-agent "OpenAI SDKを検索して"
 openhands-agent "インテルについて調べて要約して"
+openhands-agent "PythonでCSVを読むコードを生成して"
+openhands-agent "codegen: fizzbuzz in JavaScript"
 openhands-agent "ディスプレイを拡張して"
 openhands-agent "ディスプレイを複製して"
 openhands-agent "画面を暗くして"
@@ -64,6 +66,8 @@ openhands-agent "terminal: Get-Location"
 ```
 
 検索操作はまずGoogleで実行し、Google側の自動操作判定などで結果表示が完了しない場合はDuckDuckGoで再検索します。
+
+コード生成依頼は専用プロンプトで処理します。`コード生成:` / `codegen:` で明示するか、`コードを生成して`、`プログラムを書いて`、`サンプルコード` のように依頼できます。生成したコードは `.agent_sandbox/generated/` に保存し、Python、JavaScript、HTML は可能な範囲で実行確認します。`create tetris`、`creat tetris`、`テトリスゲームを作って` は、ブラウザで動くテトリスを生成して開きます。
 
 `調べて要約して` のような調査依頼では、まずGoogleでキーワード検索し、上位10件のリンク先に移動して本文を読み込みます。各ページでは要約せず本文をコピーし、最後の統合時だけLLMで150文字程度へ要約します。
 
