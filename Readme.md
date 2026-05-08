@@ -156,3 +156,11 @@ AGENT_TRACE=true
 新しい操作を増やすときは `src/openhands_agent/tools/base.py` の `Tool` を継承し、`src/openhands_agent/cli.py` の `build_agent()` で `ToolRegistry` に登録します。
 
 ツールは OpenAI Chat Completions の function tool schema と同じ形で LLM に公開されます。Ollama やモデルの tool calling 対応に差があるため、この実装では function tool call に加えて、JSON 形式の手動ツール指定も受け付けます。
+
+内部構成は、SOLID原則に寄せて責務を分けています。
+
+- `agent.py`: 会話ループ、モード制御、LLM呼び出しの調停
+- `models.py`: `AgentResponse`、`TokenUsage`、メモリー成果物などのデータモデル
+- `command_parsers.py`: 四則演算、コード生成、サンドボックス操作などの直接コマンド解析
+- `mcp_context.py`: MCP風のツール実行境界。ツール呼び出し、制限ポリシー、実行結果を一箇所で扱います
+- `tools/`: ブラウザ、ターミナル、ディスプレイ、サンドボックスなどの具体ツール実装

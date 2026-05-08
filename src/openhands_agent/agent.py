@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-import ast
 import json
 import re
 import unicodedata
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 from openai import APIConnectionError, NotFoundError, OpenAI
 
+from .command_parsers import ArithmeticEvaluator, CodeGenerationDetector, SandboxCommandParser
+from .mcp_context import McpToolContext
+from .models import AgentResponse, MemoryArtifact, TokenUsage
 from .tools.base import ToolRegistry, ToolResult
 from .tools.display import parse_resolution
 
@@ -87,55 +88,6 @@ RESEARCH_MAX_CYCLES = 3
 RESEARCH_MIN_USEFUL_PAGES = 3
 
 
-@dataclass
-class AgentResponse:
-    text: str
-    steps: int
-    token_usage: "TokenUsage | None" = None
-
-
-@dataclass
-class MemoryArtifact:
-    name: str
-    path: Path
-    kind: str
-    url: str | None = None
-    description: str = ""
-
-
-@dataclass
-class TokenUsage:
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
-    calls: int = 0
-
-    def add(self, usage: Any) -> None:
-        if usage is None:
-            return
-        prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
-        completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
-        total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
-        self.prompt_tokens += prompt_tokens
-        self.completion_tokens += completion_tokens
-        self.total_tokens += total_tokens or prompt_tokens + completion_tokens
-        self.calls += 1
-
-    def has_values(self) -> bool:
-        return self.calls > 0 and self.total_tokens > 0
-
-    def render(self) -> str:
-        if not self.has_values():
-            return "token_usage: unavailable"
-        return (
-            "token_usage: "
-            f"total={self.total_tokens}, "
-            f"prompt={self.prompt_tokens}, "
-            f"completion={self.completion_tokens}, "
-            f"model_calls={self.calls}"
-        )
-
-
 class AgentRuntimeError(RuntimeError):
     pass
 
@@ -169,6 +121,14 @@ class LocalAgent:
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": self._system_prompt()}]
         self.memory_artifacts: dict[str, MemoryArtifact] = {}
         self.last_artifact_name: str | None = None
+        self.arithmetic = ArithmeticEvaluator()
+        self.code_generation_detector = CodeGenerationDetector()
+        self.sandbox_command_parser = SandboxCommandParser()
+        self.mcp_tools = McpToolContext(
+            tools=tools,
+            restrict=self._mcp_restriction_reason,
+            trace=lambda _message: None,
+        )
 
     def set_mode(self, mode: str) -> None:
         if mode not in {AGENT_MODE, ASK_MODE, CHAT_MODE}:
@@ -517,139 +477,10 @@ class LocalAgent:
         return None
 
     def _arithmetic_text(self, text: str) -> str | None:
-        expression = self._extract_arithmetic_expression(text)
-        if expression is None:
-            return None
-
-        try:
-            result = self._eval_arithmetic_expression(expression)
-        except ZeroDivisionError:
-            return "0で割ることはできません。"
-        except ValueError:
-            return None
-
-        return f"{expression} = {self._format_arithmetic_result(result)}"
-
-    def _extract_arithmetic_expression(self, text: str) -> str | None:
-        normalized = unicodedata.normalize("NFKC", text).lower()
-        replacements = {
-            "足す": "+",
-            "たす": "+",
-            "プラス": "+",
-            "引く": "-",
-            "ひく": "-",
-            "マイナス": "-",
-            "掛ける": "*",
-            "かける": "*",
-            "かけて": "*",
-            "×": "*",
-            "割る": "/",
-            "わる": "/",
-            "÷": "/",
-        }
-        for source, target in replacements.items():
-            normalized = normalized.replace(source, target)
-        normalized = re.sub(r"(?<=\d),(?=\d{3}\b)", "", normalized)
-        normalized = re.sub(r"(?<=\d)\s*[xｘ]\s*(?=\d)", "*", normalized)
-
-        candidates = [match.group(0).strip() for match in re.finditer(r"[\d+\-*/().\s]+", normalized)]
-        candidates = [candidate for candidate in candidates if self._looks_like_arithmetic(candidate)]
-        if not candidates:
-            return None
-        return max(candidates, key=len)
-
-    def _looks_like_arithmetic(self, expression: str) -> bool:
-        expression = expression.strip()
-        if len(expression) < 3:
-            return False
-        if not re.search(r"\d", expression):
-            return False
-        if not re.search(r"[+\-*/]", expression):
-            return False
-        if re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}", expression):
-            return False
-        return True
-
-    def _eval_arithmetic_expression(self, expression: str) -> float:
-        try:
-            parsed = ast.parse(expression, mode="eval")
-        except SyntaxError as exc:
-            raise ValueError("invalid arithmetic expression") from exc
-        return self._eval_arithmetic_node(parsed.body)
-
-    def _eval_arithmetic_node(self, node: ast.AST) -> float:
-        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-            return float(node.value)
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
-            value = self._eval_arithmetic_node(node.operand)
-            return value if isinstance(node.op, ast.UAdd) else -value
-        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div)):
-            left = self._eval_arithmetic_node(node.left)
-            right = self._eval_arithmetic_node(node.right)
-            if isinstance(node.op, ast.Add):
-                return left + right
-            if isinstance(node.op, ast.Sub):
-                return left - right
-            if isinstance(node.op, ast.Mult):
-                return left * right
-            return left / right
-        raise ValueError("unsupported arithmetic expression")
-
-    def _format_arithmetic_result(self, result: float) -> str:
-        if result.is_integer():
-            return str(int(result))
-        return format(result, ".12g")
+        return self.arithmetic.try_format_result(text)
 
     def _code_generation_request(self, text: str) -> str | None:
-        stripped = text.strip()
-        normalized = unicodedata.normalize("NFKC", stripped).lower()
-        compact = re.sub(r"\s+", "", normalized)
-
-        explicit_prefixes = (
-            "codegen:",
-            "codegen：",
-            "generate code:",
-            "generate code：",
-            "コード生成:",
-            "コード生成：",
-        )
-        for prefix in explicit_prefixes:
-            if normalized.startswith(prefix):
-                request = stripped[len(prefix) :].strip()
-                return request or stripped
-
-        normalized_markers = (
-            "build a",
-            "build ",
-            "creat ",
-            "create a",
-            "create ",
-            "generate code",
-            "make a",
-            "make ",
-            "write code",
-            "write a function",
-            "create a script",
-            "sample code",
-        )
-        compact_markers = (
-            "コード生成",
-            "コードを生成",
-            "コードを書",
-            "コード作成",
-            "サンプルコード",
-            "プログラムを書",
-            "アプリを作",
-            "ゲームを作",
-            "テトリスゲームを作",
-            "関数を書",
-            "スクリプトを書",
-        )
-        if any(marker in normalized for marker in normalized_markers):
-            return stripped
-        if any(marker in compact for marker in compact_markers):
-            return stripped
-        return None
+        return self.code_generation_detector.request_from(text)
 
     def _run_code_generation(self, request: str) -> AgentResponse:
         if self._is_tetris_request(request):
@@ -1132,51 +963,7 @@ class LocalAgent:
 """
 
     def _sandbox_command(self, text: str, normalized: str) -> dict[str, Any] | None:
-        compact = re.sub(r"\s+", "", normalized)
-        if "sandbox:" in normalized:
-            command = text.split(":", 1)[1].strip()
-            if not command:
-                return {"action": "info"}
-            return {"action": "run", "command": command}
-        delete_match = re.match(r"^(?:delete|remove|rm|削除して|削除)\s+(?P<path>.+)$", text.strip(), flags=re.IGNORECASE)
-        if delete_match:
-            path = self._sandbox_relative_path(delete_match.group("path"))
-            if path is not None:
-                return {"action": "delete", "path": path}
-        if "サンドボックス" not in compact and "sandbox" not in normalized:
-            return None
-        sandbox_path = self._sandbox_path_from_text(text)
-        if any(word in compact for word in ["削除", "delete", "remove", "rm"]):
-            return {"action": "delete", "path": sandbox_path or "."}
-        if any(word in compact for word in ["初期化", "リセット", "reset"]):
-            return {"action": "reset"}
-        if any(word in compact for word in ["一覧", "list"]):
-            return {"action": "list", "path": sandbox_path or "."}
-        if any(word in compact for word in ["情報", "場所", "info"]):
-            return {"action": "info"}
-        return {"action": "info"}
-
-    def _sandbox_relative_path(self, raw_path: str) -> str | None:
-        cleaned = raw_path.strip().strip('"\'')
-        cleaned = cleaned.replace("\\", "/")
-        if not cleaned:
-            return None
-        marker = ".agent_sandbox/"
-        if cleaned == ".agent_sandbox":
-            return "."
-        if marker in cleaned:
-            return cleaned.split(marker, 1)[1].strip("/") or "."
-        if cleaned.startswith("agent_sandbox/"):
-            return cleaned.removeprefix("agent_sandbox/").strip("/") or "."
-        if cleaned.startswith("/"):
-            return None
-        return cleaned
-
-    def _sandbox_path_from_text(self, text: str) -> str | None:
-        match = re.search(r"(?:\.agent_sandbox[/\\])?(?P<path>generated[/\\][^\s]+|[\w.-]+(?:[/\\][\w.-]+)+)", text)
-        if not match:
-            return None
-        return self._sandbox_relative_path(match.group(0))
+        return self.sandbox_command_parser.parse(text, normalized)
 
     def _forget_deleted_artifact(self, deleted_path: str) -> None:
         normalized = deleted_path.replace("\\", "/").strip("/")
@@ -1996,18 +1783,12 @@ class LocalAgent:
         return result.content
 
     def _run_tool(self, name: str, raw_arguments: str | dict[str, Any]) -> ToolResult:
-        if self.mode == ASK_MODE:
-            restricted_reason = self._ask_restriction_reason(name, raw_arguments)
-            if restricted_reason:
-                return ToolResult(
-                    (
-                        "askモードでは、ファイルの削除や書き込みを伴う可能性がある操作を実行しません。\n"
-                        f"理由: {restricted_reason}\n"
-                        "この操作が必要な場合は `/mode agent` でエージェントモードに切り替えてください。"
-                    ),
-                    ok=False,
-                )
-        return self.tools.run(name, raw_arguments)
+        return self.mcp_tools.run(name, raw_arguments)
+
+    def _mcp_restriction_reason(self, name: str, raw_arguments: str | dict[str, Any]) -> str | None:
+        if self.mode != ASK_MODE:
+            return None
+        return self._ask_restriction_reason(name, raw_arguments)
 
     def _ask_restriction_reason(self, name: str, raw_arguments: str | dict[str, Any]) -> str | None:
         arguments = self._tool_arguments_for_check(raw_arguments)
