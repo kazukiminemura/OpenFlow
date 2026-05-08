@@ -17,7 +17,7 @@ class SandboxTool(Tool):
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["info", "reset", "write", "read", "list", "run"],
+                "enum": ["info", "reset", "write", "read", "list", "run", "delete"],
                 "description": "Sandbox action.",
             },
             "path": {
@@ -69,6 +69,18 @@ class SandboxTool(Tool):
             if not path.is_file():
                 return ToolResult(f"Not a file: {path.relative_to(self.root)}", ok=False)
             return ToolResult(path.read_text(encoding="utf-8", errors="replace"))
+        if action == "delete":
+            path = self._resolve(arguments.get("path") or ".")
+            if path == self.root:
+                return ToolResult("Refusing to delete the sandbox root. Use action=reset instead.", ok=False)
+            if not path.exists():
+                return ToolResult(f"Path does not exist: {path.relative_to(self.root)}", ok=False)
+            relative_path = path.relative_to(self.root)
+            if path.is_dir():
+                shutil.rmtree(path)
+                return ToolResult(f"Deleted directory {relative_path}")
+            path.unlink()
+            return ToolResult(f"Deleted file {relative_path}")
         if action == "list":
             path = self._resolve(arguments.get("path") or ".")
             if not path.exists():

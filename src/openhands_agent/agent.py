@@ -95,6 +95,15 @@ class AgentResponse:
 
 
 @dataclass
+class MemoryArtifact:
+    name: str
+    path: Path
+    kind: str
+    url: str | None = None
+    description: str = ""
+
+
+@dataclass
 class TokenUsage:
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -158,6 +167,8 @@ class LocalAgent:
         self.token_usage = TokenUsage()
         self.mode = AGENT_MODE
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": self._system_prompt()}]
+        self.memory_artifacts: dict[str, MemoryArtifact] = {}
+        self.last_artifact_name: str | None = None
 
     def set_mode(self, mode: str) -> None:
         if mode not in {AGENT_MODE, ASK_MODE, CHAT_MODE}:
@@ -433,6 +444,11 @@ class LocalAgent:
             self._trace("機能説明の直接応答を使います。")
             return AgentResponse(text=self._capability_text(), steps=1)
 
+        memory_response = self._memory_continuation_response(text, normalized)
+        if memory_response is not None:
+            self._trace("メモリーから続きの直接応答を使います。")
+            return memory_response
+
         arithmetic_text = self._arithmetic_text(text)
         if arithmetic_text is not None:
             self._trace("四則演算の直接応答を使います。")
@@ -484,6 +500,8 @@ class LocalAgent:
             self._trace_tool_call("sandbox", sandbox_args)
             result = self._run_tool("sandbox", sandbox_args)
             self._trace_tool_result(result)
+            if result.ok and sandbox_args.get("action") == "delete":
+                self._forget_deleted_artifact(str(sandbox_args.get("path", "")))
             return AgentResponse(text=self._direct_tool_text("サンドボックスを操作しました。", result), steps=1)
 
         for prefix in ("terminal:", "shell:", "run:"):
@@ -680,10 +698,129 @@ class LocalAgent:
         compact = re.sub(r"\s+", "", normalized)
         return "tetris" in normalized or "テトリス" in compact
 
+    def _memory_continuation_response(self, text: str, normalized: str) -> AgentResponse | None:
+        compact = re.sub(r"\s+", "", unicodedata.normalize("NFKC", normalized))
+        if not any(word in compact for word in ["実行", "開", "表示", "続き", "再開", "もう一度"]):
+            return None
+
+        artifact = self._artifact_for_request(text, compact)
+        if artifact is None:
+            return None
+
+        process = [
+            f"依頼内容から前回の成果物 `{artifact.name}` の続きと判定しました。",
+            f"メモリー上のパスを確認しました: {artifact.path}",
+        ]
+        if not artifact.path.exists():
+            process.append("メモリー上のファイルが見つかりませんでした。")
+            return AgentResponse(
+                text="\n".join(
+                    [
+                        "前回の成果物を実行できませんでした。",
+                        "",
+                        "途中過程:",
+                        *[f"- {step}" for step in process],
+                        "",
+                        f"確認済み:\n- ファイル存在: NG - {artifact.path}",
+                    ]
+                ),
+                steps=1,
+                token_usage=self.token_usage,
+            )
+
+        result = self._run_artifact(artifact)
+        process.append(f"{artifact.kind} の実行処理を行いました: {self._first_result_line(result.content)}")
+        lines = [
+            "対応しました。前回の成果物をメモリーから呼び出して実行しました。",
+            "",
+            "変更点:",
+            "- 直近または名前一致した生成物をメモリーから取得",
+            "- 保存済みファイルの存在を確認",
+            "- 種類に応じてブラウザ表示またはコマンド実行",
+            "",
+            "途中過程:",
+            *[f"- {step}" for step in process],
+            "",
+            "確認済み:",
+            f"- ファイル存在: OK - {artifact.path}",
+            f"- 実行: {'OK' if result.ok else 'NG'} - {self._first_result_line(result.content)}",
+            "",
+            f"対象ファイル: {artifact.path}",
+        ]
+        if artifact.url:
+            lines.append(f"URL: {artifact.url}")
+        return AgentResponse(text="\n".join(lines), steps=1, token_usage=self.token_usage)
+
+    def _artifact_for_request(self, text: str, compact: str) -> MemoryArtifact | None:
+        normalized = unicodedata.normalize("NFKC", text).lower()
+        if "tetris" in normalized or "テトリス" in compact:
+            artifact = self.memory_artifacts.get("tetris")
+            if artifact is not None:
+                return artifact
+            root = self._sandbox_root()
+            if root is None:
+                return None
+            path = root / "generated/tetris/index.html"
+            if path.exists():
+                return self._remember_artifact(
+                    "tetris",
+                    path,
+                    "html",
+                    path.resolve().as_uri(),
+                    "ブラウザで動くテトリスゲーム",
+                )
+            return None
+
+        if self.last_artifact_name:
+            return self.memory_artifacts.get(self.last_artifact_name)
+        return None
+
+    def _remember_artifact(self, name: str, path: Path, kind: str, url: str | None, description: str) -> MemoryArtifact:
+        artifact = MemoryArtifact(
+            name=name,
+            path=path.resolve(),
+            kind=kind,
+            url=url,
+            description=description,
+        )
+        self.memory_artifacts[name] = artifact
+        self.last_artifact_name = name
+        self._trace(f"メモリーに成果物を記録しました: {name} -> {artifact.path}")
+        return artifact
+
+    def _run_artifact(self, artifact: MemoryArtifact) -> ToolResult:
+        if artifact.kind == "html":
+            url = artifact.url or artifact.path.resolve().as_uri()
+            return self._run_tool("browser", {"action": "goto", "url": url, "timeout_ms": 10000})
+        if artifact.kind == "python":
+            return self._run_tool("sandbox", {"action": "run", "command": f"python {artifact.path}", "timeout_seconds": 30})
+        if artifact.kind == "javascript":
+            return self._run_tool("sandbox", {"action": "run", "command": f"node {artifact.path}", "timeout_seconds": 30})
+        return ToolResult(f"この種類の成果物は自動実行できません: {artifact.kind}", ok=False)
+
+    def _artifact_kind_from_filename(self, filename: str, language: str | None) -> str:
+        suffix = Path(filename).suffix.lower()
+        if suffix == ".py" or language in {"python", "py"}:
+            return "python"
+        if suffix == ".js" or language in {"javascript", "js", "node"}:
+            return "javascript"
+        if suffix in {".html", ".htm"} or language in {"html", "htm"}:
+            return "html"
+        return "text"
+
     def _generate_tetris_in_sandbox(self) -> AgentResponse:
         path = "generated/tetris/index.html"
+        process = [
+            "依頼内容からテトリス生成と判定しました。",
+            "ブラウザでそのまま動く単一HTMLとして生成します。",
+            f"サンドボックス内の保存先を {path} に決めました。",
+        ]
+        self._trace(process[0])
+        self._trace(process[1])
         content = self._tetris_html()
+        self._trace(f"HTML/CSS/JavaScriptを生成しました ({len(content)} chars)。")
         write_result = self._run_tool("sandbox", {"action": "write", "path": path, "content": content})
+        process.append(f"sandbox write を実行しました: {self._first_result_line(write_result.content)}")
         run_result = self._run_tool(
             "sandbox",
             {
@@ -692,37 +829,72 @@ class LocalAgent:
                 "timeout_seconds": 10,
             },
         )
+        process.append(f"sandbox run で生成ファイルの存在を確認しました: {self._first_result_line(run_result.content)}")
 
         root = self._sandbox_root()
         file_path = root / path if root else Path(".agent_sandbox") / path
         file_url = file_path.resolve().as_uri()
+        self._remember_artifact("tetris", file_path, "html", file_url, "ブラウザで動くテトリスゲーム")
         browser_result = self._run_tool("browser", {"action": "goto", "url": file_url, "timeout_ms": 10000})
+        process.append(f"browser goto で生成HTMLを開きました: {self._first_result_line(browser_result.content)}")
 
         lines = [
-            "テトリスゲームをサンドボックスに生成して実行しました。",
-            f"ファイル: {file_path}",
-            f"URL: {file_url}",
+            "対応しました。テトリスゲームをサンドボックスへ実ファイルとして生成し、実行確認しました。",
             "",
-            "確認:",
+            "変更点:",
+            "- コード生成ルートでテトリス依頼を専用処理として判定",
+            "- ブラウザでそのまま動く単一HTMLを生成",
+            f"- `.agent_sandbox/{path}` に保存",
+            "- 生成後にサンドボックス内でファイル存在確認を実行",
+            "- HTMLをブラウザで開くところまで実行",
+            "",
+            "途中過程:",
+            *[f"- {step}" for step in process],
+            "",
+            "確認済み:",
             f"- 生成: {'OK' if write_result.ok else 'NG'} - {self._first_result_line(write_result.content)}",
             f"- 実行確認: {'OK' if run_result.ok else 'NG'} - {self._first_result_line(run_result.content)}",
             f"- ブラウザ表示: {'OK' if browser_result.ok else 'NG'} - {self._first_result_line(browser_result.content)}",
+            "",
+            f"生成ファイル: {file_path}",
+            f"URL: {file_url}",
         ]
         return AgentResponse(text="\n".join(lines), steps=1, token_usage=self.token_usage)
 
     def _write_generated_code_to_sandbox(self, request: str, content: str) -> AgentResponse:
+        process = [
+            "コード生成用プロンプトでモデルに生成を依頼しました。",
+            "モデル応答からコードブロックを抽出します。",
+        ]
         code, language = self._extract_generated_code(content)
+        process.append(f"言語を {language or '未指定'} と判定しました。")
         filename = self._generated_code_filename(request, language)
+        process.append(f"保存先を {filename} に決めました。")
         write_result = self._run_tool("sandbox", {"action": "write", "path": filename, "content": code})
+        process.append(f"sandbox write を実行しました: {self._first_result_line(write_result.content)}")
         run_result = self._run_generated_code(filename, language)
+        if run_result is not None:
+            process.append(f"自動実行を行いました: {self._first_result_line(run_result.content)}")
+        else:
+            process.append("自動実行対象外の形式だったため、実行確認はスキップしました。")
 
         root = self._sandbox_root()
         file_path = root / filename if root else Path(".agent_sandbox") / filename
+        artifact_name = "generated_code"
+        self._remember_artifact(artifact_name, file_path, self._artifact_kind_from_filename(filename, language), None, "直近に生成したコード")
         lines = [
-            "コードをサンドボックスに生成しました。",
-            f"ファイル: {file_path}",
+            "対応しました。コードをサンドボックスへ実ファイルとして生成しました。",
             "",
-            "確認:",
+            "変更点:",
+            "- コード生成依頼を専用プロンプトで処理",
+            "- モデル応答からコード本文を抽出",
+            f"- `.agent_sandbox/{filename}` に保存",
+            "- 対応している形式は自動実行確認を実行",
+            "",
+            "途中過程:",
+            *[f"- {step}" for step in process],
+            "",
+            "確認済み:",
             f"- 生成: {'OK' if write_result.ok else 'NG'} - {self._first_result_line(write_result.content)}",
         ]
         if run_result is not None:
@@ -731,6 +903,7 @@ class LocalAgent:
                 lines.extend(["", run_result.content])
         else:
             lines.append("- 実行確認: この種類のコードは自動実行をスキップしました。")
+        lines.extend(["", f"生成ファイル: {file_path}"])
         return AgentResponse(text="\n".join(lines), steps=1, token_usage=self.token_usage)
 
     def _extract_generated_code(self, content: str) -> tuple[str, str | None]:
@@ -965,15 +1138,58 @@ class LocalAgent:
             if not command:
                 return {"action": "info"}
             return {"action": "run", "command": command}
+        delete_match = re.match(r"^(?:delete|remove|rm|削除して|削除)\s+(?P<path>.+)$", text.strip(), flags=re.IGNORECASE)
+        if delete_match:
+            path = self._sandbox_relative_path(delete_match.group("path"))
+            if path is not None:
+                return {"action": "delete", "path": path}
         if "サンドボックス" not in compact and "sandbox" not in normalized:
             return None
+        sandbox_path = self._sandbox_path_from_text(text)
+        if any(word in compact for word in ["削除", "delete", "remove", "rm"]):
+            return {"action": "delete", "path": sandbox_path or "."}
         if any(word in compact for word in ["初期化", "リセット", "reset"]):
             return {"action": "reset"}
         if any(word in compact for word in ["一覧", "list"]):
-            return {"action": "list"}
+            return {"action": "list", "path": sandbox_path or "."}
         if any(word in compact for word in ["情報", "場所", "info"]):
             return {"action": "info"}
         return {"action": "info"}
+
+    def _sandbox_relative_path(self, raw_path: str) -> str | None:
+        cleaned = raw_path.strip().strip('"\'')
+        cleaned = cleaned.replace("\\", "/")
+        if not cleaned:
+            return None
+        marker = ".agent_sandbox/"
+        if cleaned == ".agent_sandbox":
+            return "."
+        if marker in cleaned:
+            return cleaned.split(marker, 1)[1].strip("/") or "."
+        if cleaned.startswith("agent_sandbox/"):
+            return cleaned.removeprefix("agent_sandbox/").strip("/") or "."
+        if cleaned.startswith("/"):
+            return None
+        return cleaned
+
+    def _sandbox_path_from_text(self, text: str) -> str | None:
+        match = re.search(r"(?:\.agent_sandbox[/\\])?(?P<path>generated[/\\][^\s]+|[\w.-]+(?:[/\\][\w.-]+)+)", text)
+        if not match:
+            return None
+        return self._sandbox_relative_path(match.group(0))
+
+    def _forget_deleted_artifact(self, deleted_path: str) -> None:
+        normalized = deleted_path.replace("\\", "/").strip("/")
+        forgotten: list[str] = []
+        for name, artifact in list(self.memory_artifacts.items()):
+            artifact_path = artifact.path.as_posix()
+            if normalized and normalized in artifact_path:
+                forgotten.append(name)
+                del self.memory_artifacts[name]
+        if self.last_artifact_name in forgotten:
+            self.last_artifact_name = next(reversed(self.memory_artifacts), None)
+        if forgotten:
+            self._trace(f"削除済み成果物をメモリーから外しました: {', '.join(forgotten)}")
 
     def _display_command(self, text: str, normalized: str) -> dict[str, Any] | None:
         compact = re.sub(r"\s+", "", text.lower())
@@ -1736,8 +1952,13 @@ class LocalAgent:
         japanese_chars = len(re.findall(r"[\u3040-\u30ff\u3400-\u9fff]", stripped))
         mostly_english = ascii_letters > 120 and ascii_letters > japanese_chars * 3
         corrupted = bool(re.search(r"([|\[\]{};:,])(?:\s*\1){4,}", stripped)) or bool(re.search(r"(?:\|\s*\[\s*){3,}", stripped))
+        corrupted = corrupted or stripped.count(")") > 40 or stripped.count("）") > 40
+        chinese_like = (
+            len(re.findall(r"[的这那为们个种通用同意]", stripped)) > 20
+            and len(re.findall(r"[\u3040-\u30ff]", stripped)) == 0
+        )
         unexpected_script = thai or hangul or arabic or hebrew or cyrillic or devanagari
-        return (unexpected_script and not japanese) or english_meta or mostly_english or corrupted
+        return (unexpected_script and not japanese) or english_meta or mostly_english or corrupted or chinese_like
 
     def _is_capability_question(self, normalized: str) -> bool:
         compact = re.sub(r"\s+", "", normalized)
@@ -1798,7 +2019,7 @@ class LocalAgent:
 
         if name == "sandbox":
             action = str(arguments.get("action", "")).lower()
-            if action in {"reset", "write"}:
+            if action in {"reset", "write", "delete"}:
                 return f"sandbox action={action} はサンドボックス内のファイルを変更します。"
             if action == "run":
                 command = str(arguments.get("command", ""))

@@ -153,13 +153,16 @@ class BrowserTool(Tool):
         return ToolResult(f"Unsupported browser action: {action}", ok=False)
 
     def _ensure_page(self) -> Page:
-        if self._page is not None:
+        if self._page is not None and not self._page.is_closed():
             return self._page
-        self._playwright = sync_playwright().start()
-        self._browser = self._playwright.chromium.launch(
-            headless=self.headless,
-            args=self._launch_args(),
-        )
+        self._page = None
+        if self._playwright is None:
+            self._playwright = sync_playwright().start()
+        if self._browser is None or not self._browser.is_connected():
+            self._browser = self._playwright.chromium.launch(
+                headless=self.headless,
+                args=self._launch_args(),
+            )
         self._page = self._browser.new_page(
             viewport={"width": self.viewport_width, "height": self.viewport_height},
             reduced_motion="reduce",
