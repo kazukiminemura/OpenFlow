@@ -34,6 +34,16 @@ class BrowserTool(Tool):
                 "description": "Optional minimum body text length to wait for.",
                 "default": 0,
             },
+            "max_chars": {
+                "type": "integer",
+                "description": "Maximum text characters to return for text/evaluate. Use 0 for no trimming.",
+                "default": 8000,
+            },
+            "scroll_to_bottom": {
+                "type": "boolean",
+                "description": "Scroll to the bottom before extracting text, useful for lazy-loaded pages.",
+                "default": False,
+            },
             "limit": {
                 "type": "integer",
                 "description": "Maximum number of links to return for links.",
@@ -115,8 +125,11 @@ class BrowserTool(Tool):
 
         if action == "text":
             selector = str(arguments.get("selector") or "body")
+            if bool(arguments.get("scroll_to_bottom", False)):
+                self._scroll_to_bottom(page, timeout=timeout)
             content = page.locator(selector).inner_text(timeout=timeout)
-            return ToolResult(self._trim(content))
+            max_chars = int(arguments.get("max_chars", 8000))
+            return ToolResult(self._trim(content, limit=max_chars))
 
         if action == "links":
             limit = int(arguments.get("limit", 10))
@@ -134,7 +147,8 @@ class BrowserTool(Tool):
         if action == "evaluate":
             script = str(arguments["script"])
             value: Any = page.evaluate(script)
-            return ToolResult(self._trim(repr(value)))
+            max_chars = int(arguments.get("max_chars", 8000))
+            return ToolResult(self._trim(repr(value), limit=max_chars))
 
         return ToolResult(f"Unsupported browser action: {action}", ok=False)
 
@@ -252,9 +266,30 @@ class BrowserTool(Tool):
         return path.resolve()
 
     def _trim(self, text: str, limit: int = 8000) -> str:
+        if limit <= 0:
+            return text
         if len(text) <= limit:
             return text
         return text[:limit] + "\n...<trimmed>"
+
+    def _scroll_to_bottom(self, page: Page, timeout: int) -> None:
+        page.evaluate(
+            """async (timeoutMs) => {
+                const deadline = Date.now() + timeoutMs;
+                let previousHeight = -1;
+                while (Date.now() < deadline) {
+                    const height = document.body ? document.body.scrollHeight : 0;
+                    window.scrollTo(0, height);
+                    await new Promise((resolve) => setTimeout(resolve, 250));
+                    if (height === previousHeight) {
+                        break;
+                    }
+                    previousHeight = height;
+                }
+                window.scrollTo(0, 0);
+            }""",
+            timeout,
+        )
 
     def close(self) -> None:
         if self._browser is not None:
