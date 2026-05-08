@@ -63,7 +63,7 @@ def _format_token_usage(response: object) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run the local OpenHands AI agent.")
+    parser = argparse.ArgumentParser(description="Run the local OpenFlow AI agent.")
     parser.add_argument("prompt", nargs="*", help="Prompt to run once. If omitted, starts an interactive REPL.")
     args = parser.parse_args(argv)
 
@@ -80,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         print(
-            "OpenHands local agent. Type 'exit' or 'quit' to stop. "
+            "OpenFlow local agent. Type 'exit' or 'quit' to stop. "
             "Use 'new' for a new section, or '/mode chat', '/mode ask', '/mode agent' to switch modes."
         )
         while True:

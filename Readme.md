@@ -1,4 +1,4 @@
-# OpenHands Local Agent
+# OpenFlow Local Agent
 
 OpenAI SDK を Ollama の OpenAI 互換 API に向けて使い、ローカルの `gemma4:e4b` からブラウザ、ターミナル、ディスプレイ、サンドボックス操作を呼び出せる拡張可能な AI エージェントです。
 
@@ -22,7 +22,7 @@ ollama pull gemma4:e4b
 ## 実行
 
 ```powershell
-openhands-agent
+openflow
 ```
 
 3つのモードを切り替えられます。既定はエージェントモードです。
@@ -43,29 +43,29 @@ askモードにして
 単発指示:
 
 ```powershell
-openhands-agent "https://example.com を開いてページタイトルを確認して"
+openflow "https://example.com を開いてページタイトルを確認して"
 ```
 
 よく使う直接操作:
 
 ```powershell
-openhands-agent "open browser"
-openhands-agent "open https://example.com"
-openhands-agent "OpenAI SDKを検索して"
-openhands-agent "インテルについて調べて要約して"
-openhands-agent "PythonでCSVを読むコードを生成して"
-openhands-agent "codegen: fizzbuzz in JavaScript"
-openhands-agent "ディスプレイを拡張して"
-openhands-agent "ディスプレイを複製して"
-openhands-agent "画面を暗くして"
-openhands-agent "画面を明るくして"
-openhands-agent "明るさを70にして"
-openhands-agent "解像度を1920x1080にして"
-openhands-agent "解像度を下げて"
-openhands-agent "画面の向きを縦にして"
-openhands-agent "サンドボックスの場所を教えて"
-openhands-agent "sandbox: python --version"
-openhands-agent "terminal: Get-Location"
+openflow "open browser"
+openflow "open https://example.com"
+openflow "OpenAI SDKを検索して"
+openflow "インテルについて調べて要約して"
+openflow "PythonでCSVを読むコードを生成して"
+openflow "codegen: fizzbuzz in JavaScript"
+openflow "ディスプレイを拡張して"
+openflow "ディスプレイを複製して"
+openflow "画面を暗くして"
+openflow "画面を明るくして"
+openflow "明るさを70にして"
+openflow "解像度を1920x1080にして"
+openflow "解像度を下げて"
+openflow "画面の向きを縦にして"
+openflow "サンドボックスの場所を教えて"
+openflow "sandbox: python --version"
+openflow "terminal: Get-Location"
 ```
 
 検索操作はまずGoogleで実行し、Google側の自動操作判定などで結果表示が完了しない場合はDuckDuckGoで再検索します。
@@ -82,7 +82,7 @@ openhands-agent "terminal: Get-Location"
 
 ```mermaid
 flowchart TD
-    U[User] --> CLI[openhands-agent CLI]
+    U[User] --> CLI[openflow CLI]
     CLI --> A[LocalAgent]
 
     A --> MD{現在のモード}

@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.scripts]
-openhands-agent = "openhands_agent.cli:main"
+openflow = "openhands_agent.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
