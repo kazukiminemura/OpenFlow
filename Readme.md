@@ -1,6 +1,6 @@
 # OpenHands Local Agent
 
-OpenAI SDK を Ollama の OpenAI 互換 API に向けて使い、ローカルの `gemma4:e4b` からブラウザ操作とターミナル操作を呼び出せる拡張可能な AI エージェントです。
+OpenAI SDK を Ollama の OpenAI 互換 API に向けて使い、ローカルの `gemma4:e4b` からブラウザ、ターミナル、ディスプレイ、サンドボックス操作を呼び出せる拡張可能な AI エージェントです。
 
 ## セットアップ
 
@@ -24,6 +24,18 @@ ollama pull gemma4:e4b
 ```powershell
 openhands-agent
 ```
+
+3つのモードを切り替えられます。既定はエージェントモードです。
+
+```powershell
+/mode chat
+/mode ask
+/mode agent
+askモードにして
+エージェントモードにして
+```
+
+`chat` モードはツールや定型処理を使わず、入力をLLMへそのまま渡します。`ask` モードは検索、読み取り、状態確認を行えますが、ファイルの削除や書き込みを伴う操作を制限します。`agent` モードはブラウザ、ターミナル、ディスプレイ、サンドボックス操作を制限なしで実行できます。
 
 単発指示:
 
@@ -57,7 +69,7 @@ openhands-agent "terminal: Get-Location"
 
 ディスプレイ操作はWindowsで動作します。複数ディスプレイの拡張・複製、PC画面のみ、外部画面のみ、明るさ、解像度、画面の向きを操作できます。明るさは対応モニターのみ変更できます。
 
-コーディングやツール動作確認には `.agent_sandbox/` 配下だけを使うサンドボックスを利用できます。`sandbox: <command>` でサンドボックス内のコマンドを実行し、`サンドボックスをリセットして` で内容を削除できます。
+コーディングやツール動作確認には `.agent_sandbox/` 配下だけを使うサンドボックスを利用できます。`sandbox: <command>` でサンドボックス内のコマンドを実行し、`サンドボックスをリセットして` で内容を削除できます。`ask` モードでは `sandbox` の `write`、`reset`、危険な書き込み・削除コマンドを制限します。
 
 ## アーキテクチャ
 
@@ -66,12 +78,21 @@ flowchart TD
     U[User] --> CLI[openhands-agent CLI]
     CLI --> A[LocalAgent]
 
-    A --> D{直接操作として処理できる?}
+    A --> MD{現在のモード}
+    MD -->|chatモード| O[Ollama OpenAI互換API]
+    MD -->|askモード| D{直接操作として処理できる?}
+    MD -->|agentモード| D
     D -->|ブラウザ/ターミナル操作| T[ToolRegistry]
-    T --> B[BrowserTool / Playwright]
-    T --> S[TerminalTool]
-    T --> DT[DisplayTool / Windows display APIs]
-    T --> SB[SandboxTool / isolated workspace]
+    T --> AR{askモードの制限}
+    AR -->|削除/書き込みなら停止| A
+    AR -->|許可| B
+    AR -->|許可| S
+    AR -->|許可| DT
+    AR -->|許可| SB
+    B[BrowserTool / Playwright]
+    S[TerminalTool]
+    DT[DisplayTool / Windows display APIs]
+    SB[SandboxTool / isolated workspace]
     B --> R1[操作結果]
     S --> R1
     DT --> R1
@@ -88,12 +109,15 @@ flowchart TD
     P --> C[本文をコピー]
     C --> F[UI/ナビ/共有文言を除外]
     F --> M[コピー本文を統合材料化]
-    M --> O[Ollama OpenAI互換API]
+    M --> O
     O --> LLM[gemma4:e4b]
-    LLM --> SUM[150文字程度の統合要約]
+    LLM --> LR{応答種別}
+    LR -->|調査要約| SUM[150文字程度の統合要約]
     SUM --> A
 
     D -->|通常の自由応答| O
+    LR -->|会話| CHAT[通常の会話応答]
+    CHAT --> A
     A --> OUT[Response + token_usage]
     OUT --> U
 ```
