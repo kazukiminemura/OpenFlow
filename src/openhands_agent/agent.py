@@ -121,6 +121,7 @@ class LocalAgent:
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": self._system_prompt()}]
         self.memory_artifacts: dict[str, MemoryArtifact] = {}
         self.last_artifact_name: str | None = None
+        self.section_index = 1
         self.arithmetic = ArithmeticEvaluator()
         self.code_generation_detector = CodeGenerationDetector()
         self.sandbox_command_parser = SandboxCommandParser()
@@ -135,6 +136,12 @@ class LocalAgent:
             raise ValueError(f"unknown mode: {mode}")
         self.mode = mode
         self.messages = [{"role": "system", "content": self._system_prompt()}]
+
+    def start_new_section(self) -> None:
+        self.section_index += 1
+        self.messages = [{"role": "system", "content": self._system_prompt()}]
+        self.memory_artifacts.clear()
+        self.last_artifact_name = None
 
     def _system_prompt(self) -> str:
         mode = getattr(self, "mode", AGENT_MODE)
@@ -184,6 +191,39 @@ class LocalAgent:
             "現在のモード",
             "モード確認",
         }
+        new_section_commands = {
+            "new",
+            "/new",
+            "new section",
+            "/new section",
+            "new chat",
+            "/new chat",
+            "新しいセクション",
+            "新しいセクションにして",
+            "新規セクション",
+            "新規",
+            "新規チャット",
+        }
+
+        if normalized in new_section_commands or compact in {
+            "新しいセクション",
+            "新しいセクションに移動",
+            "新しいセクションに移って",
+            "新しいセクションにして",
+            "新規セクション",
+            "新規チャット",
+            "新しくして",
+        }:
+            self.start_new_section()
+            self._trace(f"新しいセクションに切り替えました: section {self.section_index}")
+            return AgentResponse(
+                text=(
+                    f"新しいセクションに移りました。現在は section {self.section_index} です。\n"
+                    f"モードは{self._mode_label()}のままです。会話履歴とメモリーはリセットしました。"
+                    "サンドボックス内の生成ファイルは削除していません。"
+                ),
+                steps=1,
+            )
 
         if normalized in chat_commands or compact in {
             "対話モード",
@@ -1766,6 +1806,8 @@ class LocalAgent:
             "- chatモード: `/mode chat`。ツールや定型処理を使わず、入力をLLMへそのまま渡します\n"
             "- askモード: `/mode ask`。読み取り・検索・確認はできますが、ファイル削除や書き込みを制限します\n"
             "- agentモード: `/mode agent`。ブラウザ、ターミナル、ディスプレイ、サンドボックスを制限なしで操作します\n\n"
+            "`new` と入力すると、現在のモードのまま会話履歴とメモリーをリセットして新しいセクションに移ります。"
+            "サンドボックス内の生成ファイルは削除しません。\n\n"
             "ask/agentモードでできる主な操作です。\n\n"
             "- 四則演算: `1+2`、`(10 - 4) / 3`、`3×4`、`1たす2` などを直接計算\n"
             "- コード生成: `PythonでCSVを読むコードを生成して`、`codegen: fizzbuzz in JavaScript` など\n"

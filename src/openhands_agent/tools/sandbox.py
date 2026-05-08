@@ -136,8 +136,13 @@ class SandboxTool(Tool):
             f"sandbox: {self.root}",
             f"exit_code: {completed.returncode}",
             "stdout:",
-            completed.stdout.strip() or "<empty>",
+            self._clean_output(completed.stdout),
             "stderr:",
-            completed.stderr.strip() or "<empty>",
+            self._clean_output(completed.stderr),
         ]
         return ToolResult("\n".join(output), ok=completed.returncode == 0)
+
+    def _clean_output(self, value: str | None) -> str:
+        if value is None:
+            return "<empty>"
+        return value.strip() or "<empty>"

@@ -79,7 +79,10 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             return 0
 
-        print("OpenHands local agent. Type 'exit' or 'quit' to stop. Use '/mode chat', '/mode ask', or '/mode agent' to switch modes.")
+        print(
+            "OpenHands local agent. Type 'exit' or 'quit' to stop. "
+            "Use 'new' for a new section, or '/mode chat', '/mode ask', '/mode agent' to switch modes."
+        )
         while True:
             try:
                 user_input = input("> ").strip()
