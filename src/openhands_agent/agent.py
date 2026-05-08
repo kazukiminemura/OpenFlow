@@ -8,6 +8,7 @@ from typing import Any, Callable
 from openai import APIConnectionError, NotFoundError, OpenAI
 
 from .tools.base import ToolRegistry, ToolResult
+from .tools.display import parse_resolution
 
 
 KNOWN_SITES = {
@@ -144,7 +145,10 @@ class LocalAgent:
             if self._looks_non_japanese(content):
                 self._trace("モデル応答が日本語ではなかったため、再試行せず安全な案内に置き換えます。")
                 return AgentResponse(
-                    text="すみません、モデルの応答が日本語から外れました。ブラウザ操作は `open https://...` または `ブラウザでグーグルを開いて` のように指示してください。",
+                    text=(
+                        "すみません、モデルの応答が日本語から外れました。"
+                        "`open https://...`、`terminal: Get-Location`、`ディスプレイを拡張して`、`明るさを70にして` のように指示してください。"
+                    ),
                     steps=step,
                 )
             manual_call = self._parse_manual_tool_call(content)
@@ -251,6 +255,13 @@ class LocalAgent:
             self._trace_tool_result(result)
             return AgentResponse(text=self._direct_tool_text(f"{url} を開きました。", result), steps=1)
 
+        display_args = self._display_command(text, normalized)
+        if display_args is not None:
+            self._trace_tool_call("display", display_args)
+            result = self.tools.run("display", display_args)
+            self._trace_tool_result(result)
+            return AgentResponse(text=self._direct_tool_text("ディスプレイ設定を操作しました。", result), steps=1)
+
         for prefix in ("terminal:", "shell:", "run:"):
             if normalized.startswith(prefix):
                 command = text[len(prefix) :].strip()
@@ -260,6 +271,60 @@ class LocalAgent:
                 result = self.tools.run("terminal_run", {"command": command})
                 self._trace_tool_result(result)
                 return AgentResponse(text=result.content, steps=1)
+
+        return None
+
+    def _display_command(self, text: str, normalized: str) -> dict[str, Any] | None:
+        compact = re.sub(r"\s+", "", text.lower())
+        display_words = ("display", "monitor", "screen", "ディスプレイ", "モニター", "画面")
+        projection_words = ("拡張", "複製", "pc画面のみ", "内蔵のみ", "外部のみ", "セカンドスクリーンのみ")
+        brightness_words = ("明るさ", "暗く", "明るく", "brightness")
+        if (
+            not any(word in normalized for word in display_words)
+            and not any(word in compact for word in ["解像度"])
+            and not any(word in compact for word in brightness_words)
+            and not any(word in compact for word in projection_words)
+        ):
+            return None
+
+        if any(word in compact for word in ["一覧", "確認", "表示して", "状態", "list"]):
+            return {"action": "list"}
+
+        if any(word in compact for word in ["拡張", "extend", "マルチディスプレイ拡張", "マルチプレイディスプレイ拡張"]):
+            return {"action": "mode", "mode": "extend"}
+        if any(word in compact for word in ["複製", "duplicate", "clone", "ミラー"]):
+            return {"action": "mode", "mode": "clone"}
+        if any(word in compact for word in ["pc画面のみ", "内蔵のみ", "internal"]):
+            return {"action": "mode", "mode": "internal"}
+        if any(word in compact for word in ["セカンドスクリーンのみ", "外部のみ", "external"]):
+            return {"action": "mode", "mode": "external"}
+
+        brightness_match = re.search(r"(?:明るさ|brightness)[^\d]*(?P<level>\d{1,3})", text, flags=re.IGNORECASE)
+        if brightness_match:
+            level = max(0, min(100, int(brightness_match.group("level"))))
+            return {"action": "brightness", "level": level}
+        if any(word in compact for word in ["暗く", "暗め", "暗くして", "brightnessdown"]):
+            return {"action": "brightness_delta", "delta": -20}
+        if any(word in compact for word in ["明るく", "明るめ", "明るくして", "brightnessup"]):
+            return {"action": "brightness_delta", "delta": 20}
+
+        resolution = parse_resolution(text)
+        if resolution and any(word in compact for word in ["解像度", "resolution"]):
+            width, height = resolution
+            return {"action": "resolution", "width": width, "height": height}
+        if any(word in compact for word in ["解像度を下げ", "解像度下げ", "resolutiondown"]):
+            return {"action": "resolution_delta", "direction": "down"}
+        if any(word in compact for word in ["解像度を上げ", "解像度上げ", "resolutionup"]):
+            return {"action": "resolution_delta", "direction": "up"}
+
+        if any(word in compact for word in ["上下反転", "逆さ", "landscape_flipped"]):
+            return {"action": "orientation", "orientation": "landscape_flipped"}
+        if any(word in compact for word in ["縦反転", "portrait_flipped"]):
+            return {"action": "orientation", "orientation": "portrait_flipped"}
+        if any(word in compact for word in ["横向き", "横", "landscape"]):
+            return {"action": "orientation", "orientation": "landscape"}
+        if any(word in compact for word in ["縦向き", "縦", "portrait"]):
+            return {"action": "orientation", "orientation": "portrait"}
 
         return None
 
@@ -957,6 +1022,9 @@ class LocalAgent:
                 "Self-Correction",
                 "I was unable to process",
                 "Could you please provide",
+                "正在翻译中",
+                "请提供英文文本",
+                "請提供英文文本",
             ]
         )
         ascii_letters = len(re.findall(r"[A-Za-z]", stripped))
