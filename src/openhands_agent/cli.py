@@ -10,6 +10,7 @@ from .config import load_config
 from .tools.base import ToolRegistry
 from .tools.browser import BrowserTool
 from .tools.display import DisplayTool
+from .tools.sandbox import SandboxTool
 from .tools.terminal import TerminalTool
 
 
@@ -19,6 +20,7 @@ def build_agent() -> LocalAgent:
 
     tools = ToolRegistry()
     tools.register(TerminalTool(config.workdir))
+    tools.register(SandboxTool(config.workdir))
     tools.register(DisplayTool())
     tools.register(
         BrowserTool(

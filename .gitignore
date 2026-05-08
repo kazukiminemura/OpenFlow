@@ -5,3 +5,4 @@ __pycache__/
 .pytest_cache/
 agent-screenshot.png
 *.egg-info/
+.agent_sandbox/

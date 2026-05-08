@@ -46,6 +46,8 @@ openhands-agent "明るさを70にして"
 openhands-agent "解像度を1920x1080にして"
 openhands-agent "解像度を下げて"
 openhands-agent "画面の向きを縦にして"
+openhands-agent "サンドボックスの場所を教えて"
+openhands-agent "sandbox: python --version"
 openhands-agent "terminal: Get-Location"
 ```
 
@@ -54,6 +56,8 @@ openhands-agent "terminal: Get-Location"
 `調べて要約して` のような調査依頼では、まずGoogleでキーワード検索し、上位10件のリンク先に移動して本文を読み込みます。各ページでは要約せず本文をコピーし、最後の統合時だけLLMで150文字程度へ要約します。
 
 ディスプレイ操作はWindowsで動作します。複数ディスプレイの拡張・複製、PC画面のみ、外部画面のみ、明るさ、解像度、画面の向きを操作できます。明るさは対応モニターのみ変更できます。
+
+コーディングやツール動作確認には `.agent_sandbox/` 配下だけを使うサンドボックスを利用できます。`sandbox: <command>` でサンドボックス内のコマンドを実行し、`サンドボックスをリセットして` で内容を削除できます。
 
 ## アーキテクチャ
 
@@ -67,9 +71,11 @@ flowchart TD
     T --> B[BrowserTool / Playwright]
     T --> S[TerminalTool]
     T --> DT[DisplayTool / Windows display APIs]
+    T --> SB[SandboxTool / isolated workspace]
     B --> R1[操作結果]
     S --> R1
     DT --> R1
+    SB --> R1
     R1 --> A
 
     D -->|調査要約| G[Google検索]

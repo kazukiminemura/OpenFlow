@@ -262,6 +262,13 @@ class LocalAgent:
             self._trace_tool_result(result)
             return AgentResponse(text=self._direct_tool_text("ディスプレイ設定を操作しました。", result), steps=1)
 
+        sandbox_args = self._sandbox_command(text, normalized)
+        if sandbox_args is not None:
+            self._trace_tool_call("sandbox", sandbox_args)
+            result = self.tools.run("sandbox", sandbox_args)
+            self._trace_tool_result(result)
+            return AgentResponse(text=self._direct_tool_text("サンドボックスを操作しました。", result), steps=1)
+
         for prefix in ("terminal:", "shell:", "run:"):
             if normalized.startswith(prefix):
                 command = text[len(prefix) :].strip()
@@ -273,6 +280,23 @@ class LocalAgent:
                 return AgentResponse(text=result.content, steps=1)
 
         return None
+
+    def _sandbox_command(self, text: str, normalized: str) -> dict[str, Any] | None:
+        compact = re.sub(r"\s+", "", normalized)
+        if "sandbox:" in normalized:
+            command = text.split(":", 1)[1].strip()
+            if not command:
+                return {"action": "info"}
+            return {"action": "run", "command": command}
+        if "サンドボックス" not in compact and "sandbox" not in normalized:
+            return None
+        if any(word in compact for word in ["初期化", "リセット", "reset"]):
+            return {"action": "reset"}
+        if any(word in compact for word in ["一覧", "list"]):
+            return {"action": "list"}
+        if any(word in compact for word in ["情報", "場所", "info"]):
+            return {"action": "info"}
+        return {"action": "info"}
 
     def _display_command(self, text: str, normalized: str) -> dict[str, Any] | None:
         compact = re.sub(r"\s+", "", text.lower())
