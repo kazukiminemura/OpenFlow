@@ -81,8 +81,8 @@ CHAT_MODE = "chat"
 
 
 SEARCH_SUMMARY_LINK_LIMIT = 10
-SEARCH_SUMMARY_TARGET_CHARS = 150
-SEARCH_SUMMARY_MAX_CHARS = 180
+SEARCH_SUMMARY_TARGET_CHARS = 400
+SEARCH_SUMMARY_MAX_CHARS = 600
 LLM_SUMMARY_SOURCE_CHARS = 24000
 RESEARCH_MAX_CYCLES = 3
 RESEARCH_MIN_USEFUL_PAGES = 3
@@ -1074,6 +1074,8 @@ class LocalAgent:
 
     def _search_query(self, text: str) -> str | None:
         normalized = text.strip()
+        if self._has_english_summary_intent(normalized):
+            return None
         patterns = [
             r"^検索して\s*(?P<query>.+)$",
             r"^検索して\s*(?P<query>.+?)\s*まとめて$",
@@ -1114,6 +1116,9 @@ class LocalAgent:
             r"^(?P<query>.+?)を検索して\s*(?:要約して|要約)$",
             r"^(?P<query>.+?)検索して\s*まとめて$",
             r"^(?P<query>.+?)検索して\s*(?:要約して|要約)$",
+            r"^search\s+(?P<query>.+?)\s+(?:and\s+)?(?:summari[sz]e|summary)(?:\s+(?:it|them|this|these|results?))?$",
+            r"^(?:look\s+up|research)\s+(?P<query>.+?)\s+(?:and\s+)?(?:summari[sz]e|summary)(?:\s+(?:it|them|this|these|results?))?$",
+            r"^(?P<query>.+?)\s+(?:を\s*)?(?:search|research)\s+(?:and\s+)?(?:summari[sz]e|summary)(?:\s+(?:it|them|this|these|results?))?$",
         ]
         for pattern in patterns:
             match = re.match(pattern, normalized, flags=re.IGNORECASE)
@@ -1121,6 +1126,13 @@ class LocalAgent:
                 query = self._clean_query(match.group("query"))
                 return query or None
         return None
+
+    def _has_english_summary_intent(self, text: str) -> bool:
+        return re.search(
+            r"\b(?:and\s+)?(?:summari[sz]e|summary)(?:\s+(?:it|them|this|these|results?))?\s*$",
+            text,
+            flags=re.IGNORECASE,
+        ) is not None
 
     def _clean_query(self, query: str) -> str:
         cleaned = re.sub(r"\s+", " ", query).strip(" 　")
@@ -1480,7 +1492,7 @@ class LocalAgent:
         source_items = successful or page_summaries
 
         summary = self._overall_summary_text_with_llm(query, source_items)
-        return f"`{query}` について複数サイトを確認したまとめ（{SEARCH_SUMMARY_TARGET_CHARS}文字程度）:\n{summary}"
+        return f"`{query}` について複数サイトを確認したまとめ（1パラグラフ程度）:\n{summary}"
 
     def _overall_summary_text_with_llm(self, query: str, source_items: list[dict[str, str]]) -> str:
         per_page_chars = max(1000, LLM_SUMMARY_SOURCE_CHARS // max(1, len(source_items)))
@@ -1491,7 +1503,7 @@ class LocalAgent:
         prompt = (
             f"検索テーマ: {query}\n\n"
             f"以下は複数のウェブサイトからコピーした本文です。"
-            f"全体として重要な点だけを、日本語で{SEARCH_SUMMARY_TARGET_CHARS}文字程度、最大180文字以内の1段落にまとめてください。\n"
+            f"全体として重要な点だけを、日本語で{SEARCH_SUMMARY_TARGET_CHARS}文字程度、最大{SEARCH_SUMMARY_MAX_CHARS}文字以内の1段落にまとめてください。\n"
             "ルール:\n"
             "- 各ページの個別要約ではなく、コピーされた本文全体を材料にして統合する\n"
             "- コピー本文から短いタイトル・ナビゲーション・共有ボタン文言を拾って並べない\n"
