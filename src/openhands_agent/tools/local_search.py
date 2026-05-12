@@ -49,6 +49,13 @@ class LocalSearchTool(Tool):
                 "minimum": 1,
                 "maximum": 200,
             },
+            "context_lines": {
+                "type": "integer",
+                "description": "Number of lines before and after each content match to include.",
+                "default": 0,
+                "minimum": 0,
+                "maximum": 10,
+            },
         },
         "required": ["query"],
         "additionalProperties": False,
@@ -67,6 +74,7 @@ class LocalSearchTool(Tool):
             return ToolResult(f"Unsupported local_search mode: {mode}", ok=False)
 
         max_results = min(200, max(1, int(arguments.get("max_results", 50))))
+        context_lines = min(10, max(0, int(arguments.get("context_lines", 0))))
         root = self._resolve(arguments.get("path") or ".")
         if not root.exists():
             return ToolResult(f"Path does not exist: {self._display_path(root)}", ok=False)
@@ -78,7 +86,7 @@ class LocalSearchTool(Tool):
                 if len(matches) >= max_results:
                     break
             if mode in {"all", "content"}:
-                matches.extend(self._content_matches(file_path, query, max_results - len(matches)))
+                matches.extend(self._content_matches(file_path, query, max_results - len(matches), context_lines))
                 if len(matches) >= max_results:
                     break
 
@@ -121,7 +129,7 @@ class LocalSearchTool(Tool):
         relative = str(path.relative_to(self.workdir)).replace("\\", "/").lower()
         return lowered_query in name or lowered_query in relative or fnmatch.fnmatch(name, lowered_query)
 
-    def _content_matches(self, path: Path, query: str, limit: int) -> list[str]:
+    def _content_matches(self, path: Path, query: str, limit: int, context_lines: int = 0) -> list[str]:
         if limit <= 0 or self._looks_binary(path):
             return []
 
@@ -131,14 +139,19 @@ class LocalSearchTool(Tool):
             return []
 
         pattern = re.compile(re.escape(query), flags=re.IGNORECASE)
+        lines = text.splitlines()
         matches: list[str] = []
-        for line_number, line in enumerate(text.splitlines(), start=1):
+        for line_number, line in enumerate(lines, start=1):
             if not pattern.search(line):
                 continue
-            snippet = re.sub(r"\s+", " ", line).strip()
+            start = max(1, line_number - context_lines)
+            end = min(len(lines), line_number + context_lines)
+            context = lines[start - 1 : end] if context_lines else [line]
+            snippet = re.sub(r"\s+", " ", " / ".join(context)).strip()
             if len(snippet) > 160:
                 snippet = snippet[:157].rstrip() + "..."
-            matches.append(f"content: {self._display_path(path)}:{line_number}: {snippet}")
+            location = f"{line_number}" if start == end else f"{start}-{end}"
+            matches.append(f"content: {self._display_path(path)}:{location}: {snippet}")
             if len(matches) >= limit:
                 break
         return matches

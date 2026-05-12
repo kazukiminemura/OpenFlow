@@ -340,9 +340,9 @@ class LocalAgent:
                 continue
 
             if self.mode != CHAT_MODE and self._looks_non_japanese(content):
-                self._trace("モデル応答が日本語ではなかったため、安全な案内に置き換えます。")
+                self._trace("モデル応答が日本語ではなかったため、元の質問に沿って日本語で回答し直します。")
                 return AgentResponse(
-                    text=self._non_japanese_fallback_text(user_input),
+                    text=self._recover_japanese_response(user_input, content),
                     steps=step,
                     token_usage=self.token_usage,
                 )
@@ -398,7 +398,10 @@ class LocalAgent:
         try:
             kwargs: dict[str, Any] = {
                 "model": self.model,
-                "messages": [{"role": "user", "content": user_input}],
+                "messages": [
+                    {"role": "system", "content": CHAT_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_input},
+                ],
             }
             if self.max_tokens is not None:
                 kwargs["max_tokens"] = self.max_tokens
@@ -458,6 +461,10 @@ class LocalAgent:
         if code_generation_request is not None:
             self._trace("コード生成の直接応答を使います。")
             return self._run_code_generation(code_generation_request)
+
+        local_file_question_query = self._local_file_question_query(text, normalized)
+        if local_file_question_query:
+            return self._run_local_file_question_answer(text, local_file_question_query)
 
         if normalized in {"open browser", "browser open", "ブラウザを開いて", "ブラウザ開いて"}:
             self._trace_tool_call("browser", {"action": "goto", "url": "about:blank"})
@@ -1045,6 +1052,115 @@ class LocalAgent:
         cleaned = re.sub(r"(?:を|で)?(?:探して|検索して|検索)$", "", cleaned).strip(" 　'\"`")
         return cleaned
 
+    def _local_file_question_query(self, text: str, normalized: str) -> str | None:
+        if any(marker in normalized for marker in ["http://", "https://", "ブラウザ", "browser", "display", "terminal:", "sandbox:"]):
+            return None
+        if self._local_search_command(text, normalized) is not None:
+            return None
+        if re.search(r"(検索して|search\s+)", normalized, flags=re.IGNORECASE):
+            return None
+
+        question_markers = [
+            "教えて",
+            "説明して",
+            "知りたい",
+            "どこ",
+            "どれ",
+            "何",
+            "なに",
+            "コマンド",
+            "方法",
+            "手順",
+            "使い方",
+            "設定",
+            "download",
+            "install",
+        ]
+        if not any(marker in normalized for marker in question_markers):
+            return None
+
+        ascii_terms: list[str] = []
+        for match in re.finditer(r"(?<![A-Za-z0-9_.-])([A-Za-z][A-Za-z0-9_.-]{1,})(?![A-Za-z0-9_.-])", text):
+            term = match.group(1)
+            if term.lower() not in {"download", "install", "command", "how", "what", "where"}:
+                ascii_terms.append(term)
+        if ascii_terms:
+            return " ".join(ascii_terms[:3])
+
+        local_context_markers = ["ファイル", "ローカル", "このプロジェクト", "リポジトリ", "repo", "repository", "コード"]
+        if not any(marker in normalized for marker in local_context_markers):
+            return None
+
+        match = re.match(r"^(?P<topic>.+?)を.*?(?:教えて|説明して|知りたい)$", text)
+        if match:
+            topic = self._clean_local_search_query(match.group("topic"))
+            if 1 <= len(topic) <= 60:
+                return topic
+        return None
+
+    def _run_local_file_question_answer(self, user_input: str, query: str) -> AgentResponse:
+        self._trace(f"ローカルファイル回答フロー 1/2: `{query}` をローカルファイル検索します。")
+        search_args = {"query": query, "mode": "all", "max_results": 10, "context_lines": 4}
+        self._trace_tool_call("local_search", search_args)
+        search_result = self._run_tool("local_search", search_args)
+        self._trace_tool_result(search_result)
+        if not search_result.ok:
+            return AgentResponse(text=search_result.content, steps=1, token_usage=self.token_usage)
+        if not self._local_search_result_has_matches(search_result.content):
+            return AgentResponse(
+                text=(
+                    f"ローカルファイルで `{query}` を検索しましたが、該当する記述は見つかりませんでした。\n"
+                    "そのため、ローカルファイルの内容に基づく回答はできません。"
+                ),
+                steps=1,
+                token_usage=self.token_usage,
+            )
+
+        self._trace("ローカルファイル回答フロー 2/2: 検索結果の内容から回答します。")
+        answer = self._answer_from_local_search(user_input, search_result.content)
+        return AgentResponse(text=answer, steps=2, token_usage=self.token_usage)
+
+    def _local_search_result_has_matches(self, content: str) -> bool:
+        if "近い候補:" in content:
+            return True
+        return "見つかりませんでした" not in content
+
+    def _answer_from_local_search(self, user_input: str, search_content: str) -> str:
+        fallback = self._fallback_answer_from_local_search(user_input, search_content)
+        prompt = (
+            "次のローカルファイル検索結果だけを根拠に、ユーザーの質問へ日本語で直接答えてください。\n"
+            "検索結果にない情報は推測しないでください。該当するコマンドが見つかる場合はコードブロックで示してください。\n"
+            "該当箇所が断片的で断定できない場合は、その旨を短く説明してください。\n\n"
+            f"ユーザー質問:\n{user_input}\n\n"
+            f"ローカルファイル検索結果:\n{search_content}"
+        )
+        return self._complete_japanese_text(
+            prompt=prompt,
+            fallback=fallback,
+            system_prompt="あなたはローカルファイル検索結果を根拠に、日本語で簡潔に回答するアシスタントです。",
+        )
+
+    def _fallback_answer_from_local_search(self, user_input: str, search_content: str) -> str:
+        command_lines: list[str] = []
+        for line in search_content.splitlines():
+            if not re.search(r"\b(?:docker|curl|wget|pip|npm|git|uv|python|powershell|winget|apt|brew)\b", line, flags=re.IGNORECASE):
+                continue
+            snippet = re.sub(r"^(?:content|near content):\s*[^:]+:\d+(?:-\d+)?:\s*", "", line).strip()
+            if snippet and snippet not in command_lines:
+                command_lines.append(snippet)
+            if len(command_lines) >= 3:
+                break
+
+        if command_lines and "コマンド" in user_input:
+            commands = "\n".join(f"```powershell\n{line}\n```" for line in command_lines)
+            return f"ローカルファイルの検索結果では、関連しそうなコマンドは次の通りです。\n{commands}"
+
+        return (
+            "ローカルファイル内に関連しそうな記述は見つかりました。"
+            "回答文の生成に失敗したため、検索結果の該当箇所を示します。\n"
+            f"{search_content}"
+        )
+
     def _forget_deleted_artifact(self, deleted_path: str) -> None:
         normalized = deleted_path.replace("\\", "/").strip("/")
         forgotten: list[str] = []
@@ -1623,14 +1739,25 @@ class LocalAgent:
         return True
 
     def _summarize_with_llm(self, prompt: str, fallback: str) -> str:
+        return self._complete_japanese_text(
+            prompt=prompt,
+            fallback=fallback,
+            system_prompt="あなたはウェブ調査結果を日本語で簡潔に要約するアシスタントです。",
+            clean_summary=True,
+        )
+
+    def _complete_japanese_text(
+        self,
+        prompt: str,
+        fallback: str,
+        system_prompt: str,
+        clean_summary: bool = False,
+    ) -> str:
         try:
             kwargs: dict[str, Any] = {
                 "model": self.model,
                 "messages": [
-                    {
-                        "role": "system",
-                        "content": "あなたはウェブ調査結果を日本語で簡潔に要約するアシスタントです。",
-                    },
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt},
                 ],
             }
@@ -1651,9 +1778,9 @@ class LocalAgent:
             content = completion.choices[0].message.content or ""
             cleaned = re.sub(r"\s+", " ", content).strip()
             if cleaned and not self._looks_non_japanese(cleaned):
-                return self._clean_llm_summary(cleaned)
+                return self._clean_llm_summary(cleaned) if clean_summary else cleaned
         except Exception as exc:
-            self._trace(f"LLM要約に失敗しました: {exc}")
+            self._trace(f"LLM応答生成に失敗しました: {exc}")
         return fallback
 
     def _clean_llm_summary(self, content: str) -> str:
@@ -1935,11 +2062,46 @@ class LocalAgent:
                 return reason
         return None
 
-    def _non_japanese_fallback_text(self, user_input: str = "") -> str:
+    def _recover_japanese_response(self, user_input: str, draft: str) -> str:
+        prompt = (
+            "次のユーザー質問に対して、日本語で直接回答してください。\n"
+            "英語や中国語で返さないでください。関係ないコマンド例や使い方案内に置き換えないでください。\n"
+            "下書き回答が質問に関係している場合だけ材料にし、関係ない場合は無視してください。\n\n"
+            f"ユーザー質問:\n{user_input}\n\n"
+            f"下書き回答:\n{draft[:3000]}"
+        )
+        try:
+            kwargs: dict[str, Any] = {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": "あなたは必ず自然な日本語で、ユーザーの質問にだけ答えるアシスタントです。"},
+                    {"role": "user", "content": prompt},
+                ],
+            }
+            if self.max_tokens is not None:
+                kwargs["max_tokens"] = self.max_tokens
+            options: dict[str, Any] = {}
+            if self.num_ctx is not None:
+                options["num_ctx"] = self.num_ctx
+            if self.temperature is not None:
+                options["temperature"] = self.temperature
+            if options:
+                kwargs["extra_body"] = {"options": options}
+
+            completion = self.client.chat.completions.create(**kwargs)
+            self.token_usage.add(completion.usage)
+            if self.token_usage.has_values():
+                self._trace(self.token_usage.render())
+            recovered = (completion.choices[0].message.content or "").strip()
+            if recovered and not self._looks_non_japanese(recovered):
+                return recovered
+        except (APIConnectionError, NotFoundError) as exc:
+            self._trace(f"日本語回答の再生成に失敗しました: {type(exc).__name__}: {exc}")
+
         return (
-            "すみません、モデルの応答が日本語から外れました。"
-            "`open https://...`、`terminal: Get-Location`、`codegen: tetris game`、"
-            "`ディスプレイを拡張して`、`明るさを70にして` のように指示してください。"
+            "すみません、モデルの応答が日本語から外れたため、そのまま返せませんでした。"
+            "関係ないコマンド例には置き換えません。\n"
+            f"元の質問: {user_input}"
         )
 
     def _trace(self, message: str) -> None:
