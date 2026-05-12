@@ -52,6 +52,8 @@ openflow "https://example.com を開いてページタイトルを確認して"
 openflow "open browser"
 openflow "open https://example.com"
 openflow "OpenAI SDKを検索して"
+openflow "ローカルファイル検索 TODO"
+openflow "local search agent.py"
 openflow "インテルについて調べて要約して"
 openflow "PythonでCSVを読むコードを生成して"
 openflow "codegen: fizzbuzz in JavaScript"
@@ -68,7 +70,7 @@ openflow "sandbox: python --version"
 openflow "terminal: Get-Location"
 ```
 
-検索操作はまずGoogleで実行し、Google側の自動操作判定などで結果表示が完了しない場合はDuckDuckGoで再検索します。
+検索操作はまずGoogleで実行し、Google側の自動操作判定などで結果表示が完了しない場合はDuckDuckGoで再検索します。ローカルファイル検索は作業ディレクトリ配下を対象に、ファイル名と本文の両方を検索します。完全一致がない場合は近い名前や本文中の近似語も候補として表示します。`.git`、`.venv`、`node_modules` などのノイズが多いディレクトリは既定で除外します。
 
 コード生成依頼は専用プロンプトで処理します。`コード生成:` / `codegen:` で明示するか、`コードを生成して`、`プログラムを書いて`、`サンプルコード` のように依頼できます。生成したコードは `.agent_sandbox/generated/` に保存し、Python、JavaScript、HTML は可能な範囲で実行確認します。`create tetris`、`creat tetris`、`テトリスゲームを作って` は、ブラウザで動くテトリスを生成して開きます。生成後はメモリーに成果物を記録するため、同じREPL内で `テトリスを実行して`、`もう一度開いて` のように続きの操作ができます。再起動後も `.agent_sandbox/generated/tetris/index.html` が残っていればテトリスを再実行できます。
 
@@ -89,19 +91,22 @@ flowchart TD
     MD -->|chatモード| O[Ollama OpenAI互換API]
     MD -->|askモード| D{直接操作として処理できる?}
     MD -->|agentモード| D
-    D -->|ブラウザ/ターミナル操作| T[ToolRegistry]
+    D -->|ブラウザ/ターミナル/ローカル検索操作| T[ToolRegistry]
     T --> AR{askモードの制限}
     AR -->|削除/書き込みなら停止| A
     AR -->|許可| B
     AR -->|許可| S
+    AR -->|許可| LS
     AR -->|許可| DT
     AR -->|許可| SB
     B[BrowserTool / Playwright]
     S[TerminalTool]
+    LS[LocalSearchTool]
     DT[DisplayTool / Windows display APIs]
     SB[SandboxTool / isolated workspace]
     B --> R1[操作結果]
     S --> R1
+    LS --> R1
     DT --> R1
     SB --> R1
     R1 --> A

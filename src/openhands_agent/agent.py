@@ -23,10 +23,10 @@ KNOWN_SITES = {
 }
 
 
-SYSTEM_PROMPT = """あなたはローカルで動くAIエージェントです。ブラウザ、ターミナル、ディスプレイ、サンドボックス操作のツールを使えます。
+SYSTEM_PROMPT = """あなたはローカルで動くAIエージェントです。ブラウザ、ターミナル、ローカルファイル検索、ディスプレイ、サンドボックス操作のツールを使えます。
 
 ルール:
-- ユーザーがブラウザ、ターミナル、ディスプレイ、サンドボックス操作を求めたらツールを使う。
+- ユーザーがブラウザ、ターミナル、ローカルファイル検索、ディスプレイ、サンドボックス操作を求めたらツールを使う。
 - 小さく確認しやすい手順を優先する。
 - ツール結果で確認するまで、操作が成功したと言わない。
 - 本当に必要な場合だけ確認質問をする。
@@ -48,7 +48,7 @@ CHAT_SYSTEM_PROMPT = """あなたはローカルで動く対話用AIです。
 """
 
 
-ASK_SYSTEM_PROMPT = """あなたはローカルで動く読み取り中心のAIエージェントです。ブラウザ、ターミナル、ディスプレイ、サンドボックス操作のツールを使えます。
+ASK_SYSTEM_PROMPT = """あなたはローカルで動く読み取り中心のAIエージェントです。ブラウザ、ターミナル、ローカルファイル検索、ディスプレイ、サンドボックス操作のツールを使えます。
 
 ルール:
 - ファイルやディレクトリの削除、作成、上書き、追記、移動、リネーム、権限変更を行わない。
@@ -475,6 +475,13 @@ class LocalAgent:
         research_query = self._research_query(text)
         if research_query:
             return self._run_search_and_summarize(research_query)
+
+        local_search_args = self._local_search_command(text, normalized)
+        if local_search_args is not None:
+            self._trace_tool_call("local_search", local_search_args)
+            result = self._run_tool("local_search", local_search_args)
+            self._trace_tool_result(result)
+            return AgentResponse(text=self._direct_tool_text("ローカルファイルを検索しました。", result), steps=1)
 
         search_query = self._search_query(text)
         if search_query:
@@ -1004,6 +1011,39 @@ class LocalAgent:
 
     def _sandbox_command(self, text: str, normalized: str) -> dict[str, Any] | None:
         return self.sandbox_command_parser.parse(text, normalized)
+
+    def _local_search_command(self, text: str, normalized: str) -> dict[str, Any] | None:
+        patterns = [
+            r"^(?:local\s+search|file\s+search|search\s+local\s+files?)\s+(?P<query>.+)$",
+            r"^(?:ローカルファイル検索|ローカル検索|ファイル検索)\s*(?P<query>.+)$",
+            r"^(?P<query>.+?)\s*(?:を|で)?(?:ローカルファイル検索|ローカル検索|ファイル検索)(?:して)?$",
+        ]
+        for pattern in patterns:
+            match = re.match(pattern, text.strip(), flags=re.IGNORECASE)
+            if not match:
+                continue
+            query = self._clean_local_search_query(match.group("query"))
+            if not query:
+                return None
+            mode = "all"
+            if any(word in normalized for word in ["ファイル名", "名前", "filename", "file name"]):
+                mode = "name"
+            elif any(word in normalized for word in ["本文", "内容", "content", "grep"]):
+                mode = "content"
+            return {"query": query, "mode": mode, "max_results": 50}
+        return None
+
+    def _clean_local_search_query(self, query: str) -> str:
+        cleaned = re.sub(r"\s+", " ", query).strip(" 　'\"`")
+        cleaned = re.sub(r"^(?:for|を|で)\s+", "", cleaned, flags=re.IGNORECASE).strip(" 　'\"`")
+        cleaned = re.sub(
+            r"^(?:ファイル名|名前|本文|内容|filename|file name|content|grep)\s*[:：]?\s+",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        ).strip(" 　'\"`")
+        cleaned = re.sub(r"(?:を|で)?(?:探して|検索して|検索)$", "", cleaned).strip(" 　'\"`")
+        return cleaned
 
     def _forget_deleted_artifact(self, deleted_path: str) -> None:
         normalized = deleted_path.replace("\\", "/").strip("/")
@@ -1817,13 +1857,14 @@ class LocalAgent:
             "このエージェントには3つのモードがあります。\n\n"
             "- chatモード: `/mode chat`。ツールや定型処理を使わず、入力をLLMへそのまま渡します\n"
             "- askモード: `/mode ask`。読み取り・検索・確認はできますが、ファイル削除や書き込みを制限します\n"
-            "- agentモード: `/mode agent`。ブラウザ、ターミナル、ディスプレイ、サンドボックスを制限なしで操作します\n\n"
+            "- agentモード: `/mode agent`。ブラウザ、ターミナル、ローカルファイル検索、ディスプレイ、サンドボックスを制限なしで操作します\n\n"
             "`new` と入力すると、現在のモードのまま会話履歴とメモリーをリセットして新しいセクションに移ります。"
             "サンドボックス内の生成ファイルは削除しません。\n\n"
             "ask/agentモードでできる主な操作です。\n\n"
             "- 四則演算: `1+2`、`(10 - 4) / 3`、`3×4`、`1たす2` などを直接計算\n"
             "- コード生成: `PythonでCSVを読むコードを生成して`、`codegen: fizzbuzz in JavaScript` など\n"
             "- ブラウザ操作: `open browser`、`open https://example.com`、ページタイトル取得、クリック、入力、スクリーンショットなど\n"
+            "- ローカルファイル検索: `ローカルファイル検索 TODO`、`local search agent.py` など\n"
             "- ターミナル操作: `terminal: Get-Location` のようにローカルコマンドを実行\n"
             "- ディスプレイ操作: `画面を暗くして`、`解像度を下げて`、`ディスプレイを複製して` など\n"
             "- サンドボックス操作: `sandbox: python --version`、`サンドボックスをリセットして` など\n"
